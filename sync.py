@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 import socket, sys, json, os, time, sqlite3, pprint, SocketServer, signal, base64, ctypes, struct
 from datetime import datetime, timedelta
-from multiprocessing import Process, Pipe
+from multiprocessing import Process, Pipe, Lock, freeze_support
  
 class pysync_sql(object):
     """Keeps track of all files"""
@@ -20,6 +20,7 @@ class pysync_sql(object):
         self.con.commit()
  
     def update_file( self, file_dir=False, file_properties=False ):
+        print "SQL update ", file_dir, file_properties['name']
         if file_dir and file_properties:
             self.update_dir( file_dir )
             with self.con:
@@ -27,11 +28,12 @@ class pysync_sql(object):
                 cur.execute('SELECT id FROM \"' + file_dir + '\" WHERE name=\"' + file_properties['name'] + '\"')
                 if len(cur.fetchall()) < 1:
                     values = '\"' + str(file_properties['name']) + '\", ' + '\"' + str(file_properties['modified_by']) + '\", ' \
-                        + '\"' + str(file_properties['modified_by']) + '\", ' + '\"' + str(file_properties['created']) + '\", ' \
+                        + '\"' + str(file_properties['modified_on']) + '\", ' + '\"' + str(file_properties['created']) + '\", ' \
                         + '\"' + str(file_properties['modified']) + '\"'
                     cur.execute('INSERT INTO \"' + file_dir + '\"(name, modified_by, modified_on, created, modified) VALUES(' + values + ')')
                 else:
                     update = ( file_properties['modified_by'], file_properties['modified_on'], file_properties['modified'], file_properties['name'] )
+                    print update
                     cur.execute('UPDATE \"' + file_dir + '\" SET modified_by=?, modified_on=?, modified=? WHERE name=?', update )
         self.con.commit()
 
@@ -94,7 +96,7 @@ class pysync_server(object):
     """Sends and recives files"""
     BAD_REQUEST = 400
  
-    def __init__( self, pysync_dir=False, my_address="0.0.0.0", my_port=1234 ):
+    def __init__( self, pysync_dir=False, my_address="0.0.0.0", my_port=3639 ):
         self.my_address = my_address
         self.my_port = my_port
         self.pysync_server_address = my_address
@@ -108,7 +110,6 @@ class pysync_server(object):
             self.pysync_dir = pysync_dir
         if not os.path.exists( self.pysync_dir ):
             os.makedirs( self.pysync_dir )
-        self.sql = pysync_sql( dbname=self.pysync_dir+'.pysyncfiles' )
         if os.name == 'nt':
             ctypes.windll.kernel32.SetFileAttributesW(unicode(self.pysync_dir+'.pysyncfiles'), 0x02)
         else:
@@ -118,32 +119,40 @@ class pysync_server(object):
     def start( self ):
         self.make_host, am_i_host_conn = Pipe()
         self.change_host_pipe, watch_host = Pipe()
+        self.watch_lock = Lock()
         self.am_i_host_process = Process( target=am_i_host, args=(am_i_host_conn,) )
         self.am_i_host_process.start()
-        self.watch_process = Process( target=watch, args=(watch_host,) )
+        self.watch_process = Process( target=watch, args=(watch_host, self.watch_lock) )
         self.watch_process.start()
  
     def is_host( self, is_host=False ):
         self.make_host.send(is_host)
  
     def change_host( self, change_host=False ):
+        print "Testing connection to host..."
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        test_con = (change_host['address'], change_host['port'])
+        sock.connect( test_con )
+        if self.change_host_pipe.poll():
+            self.change_host_pipe.recv()
         self.change_host_pipe.send(change_host)
- 
+        print "[ OK ] Host changed"
+
     def send( self, data ):
         if self.pysync_server_address == '0.0.0.0' or self.pysync_server_address == self.get_lan_ip():
             return False
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server = (self.pysync_server_address, self.pysync_server_port)
-        print 'Sending to ', server
+        #print "Sending to ", server
         try:
             sock.connect( server )
         except:
-            return "Couldn't connect to server on %s:%d" % server
+            raise pysync_connection_error("[ ERROR ] Couldn't connect to server on %s:%s" % server, set_host_parms )
         try:
             file_packet_length = '%015d' % len(data)
             sock.sendall( file_packet_length + data )
         except Exception as error:
-            return "Couldn't send to server: ", error
+            return "[ ERROR ] Couldn't send to server: ", error
         try:
             received = ''
             while (True):
@@ -153,17 +162,32 @@ class pysync_server(object):
                     packet = sock.recv(1024).strip()
                 break
         except:
-            return "No response from server"
+            return "[ ERROR ] No response from server"
         finally:
             sock.close()
         if received:
             return received
  
     def handle_input( self, data ):
-        data = self.unpack_packet( data, str(datetime.utcnow())[:7] )
+        if type(data) is bool and data is True:
+            return self.http_server( data )
+        try:
+            data = self.unpack_packet( data, str(datetime.utcnow())[:7] )
+        except:
+            try:
+                data = self.unpack_packet( data )
+            except:
+                return "[ ERROR ] Couldn't unpack either way"
         if data['type'] == "complete_file" and data['modified_on'] != socket.gethostname():
-            self.sql.update_file( data )
+            # Write the file
             self.write_file( data )
+            # Set the date to after it was finished being writin
+            data['modified'] = str(datetime.now())
+            # Update the sql
+            self.sql = pysync_sql( dbname=self.pysync_dir+'.pysyncfiles' )
+            self.sql.update_file( data )
+            self.sql.con.close()
+            print "Updated sql for complete_file %s " % data['name']
         elif data['type'] == "get_db":
             return self.create_file_packet( self.pysync_dir+'.pysyncfiles', str(datetime.utcnow())[:7] )
         elif data['type'] == "get_file":
@@ -171,10 +195,19 @@ class pysync_server(object):
         elif data['type'] == "delete_file":
             try:
                 os.remove( self.pysync_dir+data['file_path'] )
+                self.sql = pysync_sql( dbname=self.pysync_dir+'.pysyncfiles' )
                 self.sql.delete_file( data['file_dir'], data['file_name'] )
+                self.sql.con.close()
             except:
                 pass
         return "OK"
+
+    def http_server( self, data ):
+        output = "<center><h1>PySync Interface</h1></center>"
+        headers = "HTTP/1.1 200 OK\n"
+        headers += "Content length: %d\n" % len(output)
+        headers += "Content-Type: text/html\n\n"
+        return headers + output
  
     def encode( self, key, string ):
         encoded_chars = []
@@ -193,7 +226,7 @@ class pysync_server(object):
         write_to = self.real_path( file_packet['file_dir'], file_packet['name'] )
         if not os.path.exists( self.pysync_dir + file_packet['file_dir'] ):
             os.makedirs( self.pysync_dir + file_packet['file_dir'] )
-        print "writing_to: ", write_to
+        #print "writing_to: ", write_to
         with open( write_to, 'wb' ) as replace_file:
             replace_file.write( file_packet['contents'] )
         if os.name == 'nt' and file_packet['name'][0] == '.':
@@ -211,9 +244,15 @@ class pysync_server(object):
         return decoded_string
  
     def recv_msg( self, sock ):
-        msg_length = int(sock.recv(15).strip())
+        msg_length = sock.recv(15).strip()
         if not msg_length:
             return False
+        elif 'GET' in msg_length.split():
+            return True
+        elif 'POST' in msg_length.split():
+            print msg_length + sock.recv(1024).strip()
+        else:
+            msg_length = int(msg_length)
         return self.recvall( sock, msg_length )
  
     def recvall( self, sock, n ):
@@ -226,8 +265,8 @@ class pysync_server(object):
         return data
  
     def create_file_packet( self, file_path, key=False, contents=True, make_json=True ):
-        file_dir, file_name = self.dir_and_name( file_path )
         if os.path.isfile( file_path ):
+            file_dir, file_name = self.dir_and_name( file_path )
             file_packet = {
                 'type': 'complete_file',
                 'name': file_name,
@@ -263,7 +302,11 @@ class pysync_server(object):
     def send_file( self, file_path ):
         file_packet = self.create_file_packet( file_path, str(datetime.utcnow())[:7] )
         if file_packet:
-            return self.send( file_packet )
+            res = self.send( file_packet )
+            if res and res[:5] != "ERROR":
+                return res
+            else:
+                return False
         else:
             return "No such file"
  
@@ -279,27 +322,35 @@ class pysync_server(object):
                 self.compare_file( directory + item )
  
     def compare_file( self, file_path ):
+        self.sql = pysync_sql( dbname=self.pysync_dir+'.pysyncfiles' )
         file_packet = self.create_file_packet( file_path, contents=False, make_json=False )
+        # Dont check the database file
         if (os.name == 'nt' and self.sql.dbname.split('\\')[-1] == file_packet['name']) or self.sql.dbname.split('/')[-1] == file_packet['name']:
             return False
+        # Get the sql record for the file
         sql_record = self.sql.get_file( file_packet['file_dir'], file_packet['name'] )
+        # No sql record, create one
         if not sql_record:
             self.sql.update_file( file_packet['file_dir'], file_packet )
-            self.send_file( file_path )
-            print "Created ", file_packet['name']
+            print "Created sql", file_packet['name']
+        # Sql record present
         else:
+            # Make datetime objects for compairison
             sql_record['modified'] = datetime.strptime(sql_record['modified'].split('.')[0], "%Y-%m-%d %H:%M:%S")
             file_packet['modified'] = datetime.strptime(file_packet['modified'].split('.')[0], "%Y-%m-%d %H:%M:%S")
-            # If it was modified elsewhere more recently
+            # Check if the actual file was modified more recently
             if sql_record['modified'] < file_packet['modified']:
+                print "\t", sql_record['modified'], "<",file_packet['modified']
                 self.sql.update_file( file_packet['file_dir'], file_packet )
-                self.send_file( file_path )
-                print "Updated ", file_packet['name']
+                print "Updated sql", file_packet['name']
+        self.sql.con.close()
 
-    def update_sql( self, server_props ):
+    def get_server_updates( self, server_props ):
+        self.sql = pysync_sql( dbname=self.pysync_dir+'.pysyncfiles' )
         if server_props:
             self.pysync_server_address = server_props['address']
             self.pysync_server_port = server_props['port']
+        # get the server's sql database
         packet = {'type': 'get_db'}
         packet = self.encode( str(datetime.utcnow())[:7], json.dumps(packet) )
         response = self.send( packet )
@@ -309,36 +360,61 @@ class pysync_server(object):
             self.write_file( sync_with )
             sync_with_path = self.real_path( '/','.sync_with')
             sync_with = pysync_sql( dbname=sync_with_path )
+            # Get all files from each
             server_files = sync_with.all_files()
             myfiles = self.sql.all_files()
-            sync_with.con.close()
-            os.remove( sync_with_path )
+            for my_file in myfiles:
+                server_file = sync_with.get_file( my_file['file_dir'].replace('/','\\'), my_file['name'] ) or sync_with.get_file( my_file['file_dir'].replace('\\','/'), my_file['name'] )
+                my_file['file_path'] = self.real_path( my_file['file_dir'], my_file['name'] )
+                # Check if the file is on the server
+                if server_file:
+                    my_file['modified'] = datetime.strptime(my_file['modified'].split('.')[0], "%Y-%m-%d %H:%M:%S")
+                    server_file['modified'] = datetime.strptime(server_file['modified'].split('.')[0], "%Y-%m-%d %H:%M:%S")
+                    # Check if our version is newer than the servers
+                    if server_file['modified'] < my_file['modified']:
+                        self.send_file( my_file['file_path'] )
+                        print "Sent updated: ", my_file['name']
+                else:
+                    print server_file, self.real_path(my_file['file_dir'], my_file['name'] )
+                    # Server doesn't have the file
+                    self.send_file( my_file['file_path'] )
+                    print "Sent original: ", my_file['name']
             for server_file in server_files:
-                my_file = self.create_file_packet( self.real_path( server_file['file_dir'], server_file['name']), contents=False, make_json=False )
+                my_file = self.sql.get_file( server_file['file_dir'].replace('/','\\'), server_file['name'] ) or self.sql.get_file( server_file['file_dir'].replace('\\','/'), server_file['name'] )
+                # Check if client has the file
                 if my_file:
                     my_file['modified'] = datetime.strptime(my_file['modified'].split('.')[0], "%Y-%m-%d %H:%M:%S")
                     server_file['modified'] = datetime.strptime(server_file['modified'].split('.')[0], "%Y-%m-%d %H:%M:%S")
-                    # If it was modified elsewhere more recently
-                    if my_file['modified'] < server_file['modified'] and server_file['modified_on'] != socket.gethostname():
-                        print "\t", my_file['modified'], server_file['modified'], server_file['modified_on'], socket.gethostname()
+                    # If it was modified elsewhere more recently and that place was not the clients computer
+                    if my_file['modified'] < server_file['modified'] and server_file['modified_on'] != my_file['modified_on']:
+                        print "\t", my_file['modified'],  "<",server_file['modified'], "\n\t",server_file['modified_on'], "!=", my_file['modified_on']
+                        # Request the file from the server
                         packet = {'type': 'get_file', 'file_path': server_file['file_dir'] + server_file['name'] }
                         packet = self.encode( str(datetime.utcnow())[:7], json.dumps(packet) )
-                        server_file = self.send( packet )
                         server_file = self.unpack_packet( self.send( packet ), str(datetime.utcnow())[:7] )
                         self.write_file( server_file )
-                        server_file = self.create_file_packet( self.real_path( server_file['file_dir'], server_file['name']), contents=False, make_json=False )
+                        # Set the date to after it was finished being writin
+                        server_file['modified'] = str(datetime.now())
+                        # Update the sql for the file
                         self.sql.update_file( server_file )
-                        print "Updated ", server_file['name']
+                        print "Updated from server ", server_file['name'], server_file['modified_on']
+                        my_file = self.sql.get_file( server_file['file_dir'].replace('/','\\'), server_file['name'] ) or self.sql.get_file( server_file['file_dir'].replace('\\','/'), server_file['name'] )
+                        print "Became ", my_file['name'], my_file['modified_on']
                 else:
-                    print "\tlocal version not present"
+                    print "\tLocal version not present"
+                    # Request the file from the server
                     packet = {'type': 'get_file', 'file_path': server_file['file_dir'] + server_file['name'] }
                     packet = self.encode( str(datetime.utcnow())[:7], json.dumps(packet) )
                     server_file = self.unpack_packet( self.send( packet ), str(datetime.utcnow())[:7] )
-                    if server_file['modified_on'] != socket.gethostname():
-                        self.write_file( server_file )
-                        server_file = self.create_file_packet( self.real_path( server_file['file_dir'], server_file['name']), contents=False, make_json=False )
-                        self.sql.update_file( server_file )
-                        print "Created ", server_file['name']
+                    self.write_file( server_file )
+                    # Set the date to after it was finished being writin
+                    server_file['modified'] = str(datetime.now())
+                    # Update the sql for the file
+                    self.sql.update_file( server_file )
+                    print "Created from server ", server_file['name'], server_file['modified_on']
+            sync_with.con.close()
+            self.sql.con.close()
+            os.remove( sync_with_path )
 
     def real_path( self, file_dir, file_name ):
         if os.name == 'nt':
@@ -392,13 +468,26 @@ class pysync_server(object):
 class pysync_connection_handler(SocketServer.BaseRequestHandler):
     def handle(self):
         server = pysync_server()
-        message = server.recv_msg( self.request )
-        #try:
-        response = server.handle_input( message )
-        #except:
-        #    response = "ERROR"
-        self.request.sendall( response )
- 
+        try:
+            message = server.recv_msg( self.request )
+            try:
+                response = server.handle_input( message )
+            except Exception, e:
+                response = "[ ERROR ] Creating response: ", e
+        except Exception, e:
+            print "[ ERROR ] Reciving message: ", e
+        try:
+            self.request.sendall( response )
+        except Exception, e:
+            print "[ ERROR ] Sending response: ", e
+
+class pysync_connection_error(Exception):
+    def __init__(self, value, function):
+        self.value = value
+        self.function = function
+    def __str__(self):
+        return repr(self.value)
+
 def am_i_host( make_host ):
     server.server_process = Process( target=start_server )
     while True:
@@ -421,33 +510,92 @@ def am_i_host( make_host ):
         time.sleep(10)
  
 def start_server():
-    socket_server = SocketServer.TCPServer((server.pysync_server_address, server.pysync_server_port), pysync_connection_handler)
-    socket_server.serve_forever()
+    server.socket_server = SocketServer.TCPServer((server.pysync_server_address, server.pysync_server_port), pysync_connection_handler)
+    server.socket_server.serve_forever()
  
-def watch( watch_host ):
+def watch( watch_host, watch_lock ):
     while True:
         if watch_host.poll():
             change = watch_host.recv()
         else: change = False
-        if change:
+        if change == 'CHANGING':
+            time.sleep(5)
+            continue
+        elif change:
             server.pysync_server_address = change['address']
             server.pysync_server_port = change['port']
         if os.path.isdir( server.pysync_dir ):
-            server.scan_dir( server.pysync_dir )
+            try:
+                server.scan_dir( server.pysync_dir )
+            except Exception, e:
+                print e
+                try:
+                    watch_host.send( e.function )
+                except:
+                    pass
+                time.sleep(5)
+                continue
         else:
             os.makedirs( server.pysync_dir )
-        server.update_sql( change )
+        try:
+            server.get_server_updates( change )
+        except Exception, e:
+            print e
+            try:
+                watch_host.send( e.function )
+            except:
+                pass
+            time.sleep(5)
+            continue
         time.sleep(5)
- 
+
+def set_host_parms( host=False ):
+    if not host:
+        host = raw_input('Host (if this is the host type \'me\'): ')
+    error = True
+    while error:
+        if host == 'me':
+            server.is_host(True)
+        else:
+            try:
+                host = { 'address': host.split(':')[0], 'port': int(host.split(':')[1]) }
+            except:
+                print "[ FAIL ] Host in form of address:port, default port is 3639"
+            try:
+                server.change_host( host )
+                error = False
+            except:
+                print "[ FAIL ] Failed to connect"
+                host = raw_input('Host (if this is the host type \'me\'): ')
+
+def changing_server_address( pipe, kill_me ):
+    while True:
+        pipe.send( 'CHANGING' )
+        if kill_me.poll() and kill_me.recv() is True:
+            return True
+        time.sleep(5)
+
 def signal_handler(signal, frame):
+    print ""
     sys.exit(0)
 
 signal.signal(signal.SIGINT, signal_handler)
 server = pysync_server()
  
 if __name__ == '__main__':
+    freeze_support()
     server.start()
-    server.is_host(True)
-    #server.change_host( { 'address': '10.7.198.148', 'port': 1234 } )
-    #time.sleep(20)
-    #server.is_host(False)
+    set_host_parms()
+    while True:
+        if server.change_host_pipe.poll():
+            res = server.change_host_pipe.recv()
+            try:
+                if res['address']:
+                    server.change_host_pipe.send( res )
+            except:
+                kill_it, kill_me = Pipe()
+                changing = Process( target=changing_server_address, args=(server.change_host_pipe, kill_me,) )
+                changing.start()
+                res()
+                kill_it.send(True)
+                server.change_host_pipe.recv()
