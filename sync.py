@@ -279,7 +279,7 @@ class pysync_server(object):
     <div role="main" class="ui-content">
         <ul data-role="listview" data-filter="true" data-filter-placeholder="Search files..." data-inset="true">''', '''
         </ul>
-    </div><!-- /content -->
+    </div><!-- /content -->''','''
 
     <div data-role="footer">
         <h4>''', '- John Andersen', '''</h4>
@@ -321,6 +321,21 @@ html{ font-family: "Myriad Set Pro","Lucida Grande","Helvetica Neue","Helvetica"
             request_file = sql.get_file( file_dir, file_name )
             sql.con.close()
             if request_file:
+                output.insert(2, '''
+<li><a href="#popupDialog" data-rel="popup" data-position-to="window" data-transition="pop" >Delete</a></li>
+<div data-role="popup" id="popupDialog" data-dismissible="false" style="max-width:400px;">
+    <div data-role="header" data-theme="a">
+    <h1>Delete File?</h1>
+    </div>
+    <div role="main" class="ui-content">
+        <h3 class="ui-title">Are you sure you want to delete this file?</h3>
+    <p>This action cannot be undone.</p>
+        <a href="#" class="ui-btn ui-corner-all ui-shadow ui-btn-inline ui-btn-b" data-rel="back">Cancel</a>
+        <a href="#" class="ui-btn ui-corner-all ui-shadow ui-btn-inline ui-btn-b" data-rel="back" data-transition="flow">Delete</a>
+    </div>
+</div>
+''' )
+                output.insert(2, '\n<li data-role="list-divider" >File Options</li>')
                 for prop in request_file:
                     output.insert(2, '\n<li><a href="#" data-transition="flip" >'+str(request_file[prop])+'</a></li>')
                     output.insert(2, '\n<li data-role="list-divider" >'+str(prop)+'</li>')
