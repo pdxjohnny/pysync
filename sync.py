@@ -1,9 +1,11 @@
 #! /usr/bin/python
 # -*- coding: utf-8 -*-
-import socket, sys, json, os, time, sqlite3, pprint, SocketServer, signal, base64, ctypes, struct
+import socket, sys, json, os, time, sqlite3, pprint, SocketServer, signal, base64, ctypes, struct, urllib
 from datetime import datetime, timedelta
 from multiprocessing import Process, Pipe, Lock, freeze_support
- 
+if os.name != 'nt':
+    import fcntl
+
 class pysync_sql(object):
     """Keeps track of all files"""
     def __init__( self, dbname=".pysyncfiles" ):
@@ -17,7 +19,7 @@ class pysync_sql(object):
                 cur.execute('SELECT name FROM sqlite_master WHERE type=\"table\" AND name=\"' + file_dir + '\"')
                 if len(cur.fetchall()) < 1:
                     cur.execute('CREATE TABLE \"' + file_dir + '\"(id integer primary key AUTOINCREMENT, name TEXT, modified_by TEXT, modified_on TEXT, created datetime, modified datetime)')
-        self.con.commit()
+                    self.con.commit()
  
     def update_file( self, file_dir=False, file_properties=False ):
         if file_dir and file_properties:
@@ -33,13 +35,13 @@ class pysync_sql(object):
                 else:
                     update = ( file_properties['modified_by'], file_properties['modified_on'], file_properties['modified'], file_properties['name'] )
                     cur.execute('UPDATE \"' + file_dir + '\" SET modified_by=?, modified_on=?, modified=? WHERE name=?', update )
-        self.con.commit()
+                self.con.commit()
 
     def delete_file( self, file_dir, file_name ):
         with self.con:
             cur = self.con.cursor()
             cur.execute('DELETE FROM ? where name=?', ( file_dir, file_name ) )
-        self.con.commit()
+            self.con.commit()
 
     def all_dirs( self ):
         with self.con:
@@ -49,13 +51,13 @@ class pysync_sql(object):
             self.con.commit()
             return dirs
  
-    def all_files( self ):
+    def all_files( self, table=False ):
         dirs = self.all_dirs()
         all_files = [];
         with self.con:
-            for file_dir in dirs:
+            if table:
                 cur = self.con.cursor()
-                cur.execute('SELECT * FROM \"' + file_dir + '\"')
+                cur.execute('SELECT * FROM \"' + table + '\"')
                 files = cur.fetchall()
                 for file_properties in files:
                     all_files.append( {
@@ -65,10 +67,42 @@ class pysync_sql(object):
                         'modified_on': file_properties[3],
                         'created': file_properties[4],
                         'modified': file_properties[5],
-                        'file_dir': file_dir
+                        'file_dir': table
+                        } )
+            else:
+                for file_dir in dirs:
+                    cur = self.con.cursor()
+                    cur.execute('SELECT * FROM \"' + file_dir + '\"')
+                    files = cur.fetchall()
+                    for file_properties in files:
+                        all_files.append( {
+                            'id': file_properties[0],
+                            'name': file_properties[1],
+                            'modified_by': file_properties[2],
+                            'modified_on': file_properties[3],
+                            'created': file_properties[4],
+                            'modified': file_properties[5],
+                            'file_dir': file_dir
+                            } )
+            self.con.commit()
+        return all_files
+
+    def all_files_by_dir( self ):
+        dirs = self.all_dirs()
+        all_files_by_dir = {}
+        with self.con:
+            for file_dir in dirs:
+                all_files_by_dir[file_dir] = []
+                cur = self.con.cursor()
+                cur.execute('SELECT \"id\", \"name\" FROM \"' + file_dir + '\"')
+                files = cur.fetchall()
+                for file_properties in files:
+                    all_files_by_dir[file_dir].append( {
+                        'id': file_properties[0],
+                        'name': file_properties[1]
                         } )
             self.con.commit()
-            return all_files
+            return all_files_by_dir
  
     def get_file( self, file_dir=False, file_name=False ):
         with self.con:
@@ -167,8 +201,11 @@ class pysync_server(object):
             return received
  
     def handle_input( self, data ):
-        if type(data) is bool and data is True:
-            return self.http_server( data )
+        try:
+            if 'GET' in data.split() or 'POST' in data.split():
+                return self.http_server( data )
+        except Exception, e:
+            print e
         try:
             data = self.unpack_packet( data, str(datetime.utcnow())[:7] )
         except:
@@ -179,21 +216,32 @@ class pysync_server(object):
         if data['type'] == "complete_file" and data['modified_on'] != socket.gethostname():
             # Write the file
             self.write_file( data )
+            print "Wrote %s %s " % ( data['file_dir'], data['name'] )
             # Set the date to after it was finished being writin
             data['modified'] = str(datetime.now())
             # Update the sql
-            sql = pysync_sql( dbname=self.pysync_dir+'.pysyncfiles' )
-            sql.update_file( data )
+            sql = pysync_sql( dbname=self.real_path('/','.pysyncfiles') )
+            sql.update_file( data['file_dir'], data )
             sql.con.close()
-            print "Updated sql for complete_file %s " % data['name']
+            print "Updated sql %s %s " % ( data['file_dir'], data['name'] )
+            del data['contents']
+            data = json.dumps( data )
+            data = self.encode( str(datetime.utcnow())[:7], data )
+            return data
         elif data['type'] == "get_db":
-            return self.create_file_packet( self.pysync_dir+'.pysyncfiles', str(datetime.utcnow())[:7] )
+            return self.create_file_packet( self.real_path('/','.pysyncfiles'), str(datetime.utcnow())[:7] )
         elif data['type'] == "get_file":
             return self.create_file_packet( self.pysync_dir+data['file_path'], str(datetime.utcnow())[:7] )
+        elif data['type'] == "update_sql":
+            sql = pysync_sql( dbname=self.real_path('/','.pysyncfiles') )
+            print "Before sql update", sql.get_file( data['file_dir'], data['name'] )['modified_on']
+            sql.update_file( data['file_dir'], data )
+            print "After sql update", sql.get_file( data['file_dir'], data['name'] )['modified_on']
+            sql.con.close()
         elif data['type'] == "delete_file":
             try:
                 os.remove( self.pysync_dir+data['file_path'] )
-                sql = pysync_sql( dbname=self.pysync_dir+'.pysyncfiles' )
+                sql = pysync_sql( dbname=self.real_path('/','.pysyncfiles') )
                 sql.delete_file( data['file_dir'], data['file_name'] )
                 sql.con.close()
             except:
@@ -201,11 +249,85 @@ class pysync_server(object):
         return "OK"
 
     def http_server( self, data ):
-        output = "<center><h1>PySync Interface</h1></center>"
+        if 'GET' in data:
+            page = data[data.index('GET')+4 : data.index('HTTP')-1]
+        elif 'POST' in data:
+            page = data[data.index('POST')+5 : data.index('HTTP')-1]
+        page = urllib.unquote( page ).decode('utf8') 
+        output = [
+'''
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Py Sync</title>
+
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    <link rel="stylesheet" href="http://code.jquery.com/mobile/1.4.3/jquery.mobile-1.4.3.min.css" />
+    <script src="http://code.jquery.com/jquery-1.11.1.min.js"></script>
+    <script src="http://code.jquery.com/mobile/1.4.3/jquery.mobile-1.4.3.min.js"></script>
+</head>
+<body>
+''',
+'''
+<div data-role="page">
+
+    <div data-role="header">
+        <h1>Py Sync</h1>
+    </div><!-- /header -->
+
+    <div role="main" class="ui-content">
+        <ul data-role="listview" data-filter="true" data-filter-placeholder="Search files..." data-inset="true">''', '''
+        </ul>
+    </div><!-- /content -->
+
+    <div data-role="footer">
+        <h4>''', '- John Andersen', '''</h4>
+    </div><!-- /footer -->
+</div><!-- /page -->''',
+'''
+<style>
+html{ font-family: "Myriad Set Pro","Lucida Grande","Helvetica Neue","Helvetica","Arial","Verdana","sans-serif";}
+</style>
+</body>
+</html>
+''' ]
+        if page == '/':
+            sql = pysync_sql( dbname=self.real_path('/','.pysyncfiles') )
+            all_dirs = sql.all_files_by_dir()
+            sql.con.close()
+            for directory in all_dirs:
+                for row in all_dirs[directory]:
+                    output.insert(2, '\n<li><a href="'+directory+row['name']+'" data-transition="flip" >'+directory+row['name']+'</a></li>')
+                output.insert(2, '\n<li data-role="list-divider" >'+directory+'</li>')
+        else:
+            if os.name == 'nt':
+                page = page.replace('/','\\')
+            file_dir = ''.join(page.split('/')[:-1]) or ''.join(page.split('\\')[:-1])
+            file_dir += '/'
+            file_name = page.split('/')[-1] or page.split('\\')[-1]
+            output[1] = '''
+<div data-role="page" data-dialog="true">
+
+    <title>''' +file_name+ '''</title>
+
+    <div data-role="header">
+        <h1>''' +file_name+ '''</h1>
+    </div><!-- /header -->
+
+    <div role="main" class="ui-content">
+        <ul data-role="listview" data-inset="true">'''
+            sql = pysync_sql( dbname=self.real_path('/','.pysyncfiles') )
+            request_file = sql.get_file( file_dir, file_name )
+            sql.con.close()
+            if request_file:
+                for prop in request_file:
+                    output.insert(2, '\n<li><a href="#" data-transition="flip" >'+str(request_file[prop])+'</a></li>')
+                    output.insert(2, '\n<li data-role="list-divider" >'+str(prop)+'</li>')
         headers = "HTTP/1.1 200 OK\n"
-        headers += "Content length: %d\n" % len(output)
+        headers += "Content length: %d\n" % len(''.join(output))
         headers += "Content-Type: text/html\n\n"
-        return headers + output
+        return headers + ''.join(output)
  
     def encode( self, key, string ):
         encoded_chars = []
@@ -245,10 +367,10 @@ class pysync_server(object):
         msg_length = sock.recv(15).strip()
         if not msg_length:
             return False
-        elif 'GET' in msg_length.split():
-            return True
-        elif 'POST' in msg_length.split():
-            print msg_length + sock.recv(1024).strip()
+        elif 'GET' in msg_length:
+            return msg_length + sock.recv(2048).strip()
+        elif 'POST' in msg_length:
+            return msg_length + sock.recv(2048).strip()
         else:
             msg_length = int(msg_length)
         return self.recvall( sock, msg_length )
@@ -372,12 +494,24 @@ class pysync_server(object):
                     server_file['modified'] = datetime.strptime(server_file['modified'].split('.')[0], "%Y-%m-%d %H:%M:%S")
                     # Check if our version is newer than the servers
                     if server_file['modified'] < my_file['modified']:
-                        self.send_file( my_file['file_path'] )
-                        print "Sent updated: ", my_file['name']
+                        # Get back the time the file was writin on server and set that in our db
+                        print "Sent updated: ", my_file['name'], my_file['modified'],
+                        update_file = self.send_file( my_file['file_path'] )
+                        update_file = self.unpack_packet( update_file, str(datetime.utcnow())[:7] )
+                        sql.update_file( update_file['file_dir'], update_file )
+                        print "\n\trecived at ", update_file['modified'].split('.')[0]
+                        update_file = sql.get_file( update_file['file_dir'].replace('/','\\'), update_file['name'] ) or sync_with.get_file( update_file['file_dir'].replace('\\','/'), update_file['name'] )
+                        print "Local sql record is now at ", update_file['modified'].split('.')[0]
                 else:
                     # Server doesn't have the file
-                    self.send_file( my_file['file_path'] )
-                    print "Sent original: ", my_file['name']
+                    print "Sent original: ", my_file['name'], my_file['modified'],
+                    # Get back the time the file was writin on server and set that in our db
+                    update_file = self.send_file( my_file['file_path'] )
+                    update_file = self.unpack_packet( update_file, str(datetime.utcnow())[:7] )
+                    sql.update_file( update_file['file_dir'], update_file )
+                    print "\n\trecived at ", update_file['modified'].split('.')[0]
+                    update_file = sql.get_file( update_file['file_dir'].replace('/','\\'), update_file['name'] ) or sync_with.get_file( update_file['file_dir'].replace('\\','/'), update_file['name'] )
+                    print "Local sql record is now at ", update_file['modified']
             sync_with.con.close()
             os.remove( sync_with_path )
             for server_file in server_files:
@@ -387,19 +521,26 @@ class pysync_server(object):
                     my_file['modified'] = datetime.strptime(my_file['modified'].split('.')[0], "%Y-%m-%d %H:%M:%S")
                     server_file['modified'] = datetime.strptime(server_file['modified'].split('.')[0], "%Y-%m-%d %H:%M:%S")
                     # If it was modified elsewhere more recently and that place was not the clients computer
-                    if my_file['modified'] < server_file['modified'] and server_file['modified_on'] != my_file['modified_on']:
-                        print "\t", my_file['modified'],  "<",server_file['modified'], "\n\t",server_file['modified_on'], "!=", my_file['modified_on']
+                    if my_file['modified'] < server_file['modified'] and server_file['modified_on'] != socket.gethostname():
+                        print "\t", my_file['modified'],  "<",server_file['modified'], "\n\t",server_file['modified_on'], "!=",socket.gethostname()
                         # Request the file from the server
                         packet = {'type': 'get_file', 'file_path': server_file['file_dir'] + server_file['name'] }
                         packet = self.encode( str(datetime.utcnow())[:7], json.dumps(packet) )
                         server_file = self.unpack_packet( self.send( packet ), str(datetime.utcnow())[:7] )
                         self.write_file( server_file )
                         # Set the date to after it was finished being writin
+                        server_modified_time = server_file['modified']
                         server_file['modified'] = str(datetime.now())
                         # Update the sql for the file
                         sql.update_file( server_file['file_dir'], server_file )
+                        # Send back to the server to tell it when our file was writen
+                        del server_file['contents']
+                        server_file['modified_on'] = socket.gethostname()
+                        server_file['type'] = 'update_sql'
+                        server_file['modified'] = server_modified_time
+                        updated_server_file = self.encode( str(datetime.utcnow())[:7], json.dumps( server_file ) )
+                        self.send( updated_server_file )
                         print "Updated from server ", server_file['name'], server_file['modified_on']
-                        my_file = sql.get_file( server_file['file_dir'].replace('/','\\'), server_file['name'] ) or sql.get_file( server_file['file_dir'].replace('\\','/'), server_file['name'] )
                 else:
                     print "\tLocal version not present"
                     # Request the file from the server
@@ -408,9 +549,17 @@ class pysync_server(object):
                     server_file = self.unpack_packet( self.send( packet ), str(datetime.utcnow())[:7] )
                     self.write_file( server_file )
                     # Set the date to after it was finished being writin
+                    server_modified_time = server_file['modified']
                     server_file['modified'] = str(datetime.now())
                     # Update the sql for the file
                     sql.update_file( server_file['file_dir'], server_file )
+                    # Send back to the server to tell it when our file was writen
+                    del server_file['contents']
+                    server_file['modified_on'] = socket.gethostname()
+                    server_file['modified'] = server_modified_time
+                    server_file['type'] = 'update_sql'
+                    updated_server_file = self.encode( str(datetime.utcnow())[:7], json.dumps( server_file ) )
+                    self.send( updated_server_file )
                     print "Created from server ", server_file['name'], server_file['modified_on']
             sql.con.close()
 
@@ -470,14 +619,14 @@ class pysync_connection_handler(SocketServer.BaseRequestHandler):
             message = server.recv_msg( self.request )
             try:
                 response = server.handle_input( message )
+                try:
+                    self.request.sendall( response )
+                except Exception, e:
+                    print "[ ERROR ] Sending response: ", e
             except Exception, e:
                 response = "[ ERROR ] Creating response: ", e
         except Exception, e:
             print "[ ERROR ] Reciving message: ", e
-        try:
-            self.request.sendall( response )
-        except Exception, e:
-            print "[ ERROR ] Sending response: ", e
 
 class pysync_connection_error(Exception):
     def __init__(self, value, function):
@@ -574,7 +723,6 @@ def changing_server_address( pipe, kill_me ):
         time.sleep(5)
 
 def signal_handler(signal, frame):
-    print ""
     sys.exit(0)
 
 signal.signal(signal.SIGINT, signal_handler)
