@@ -20,7 +20,6 @@ class pysync_sql(object):
         self.con.commit()
  
     def update_file( self, file_dir=False, file_properties=False ):
-        print "SQL update ", file_dir, file_properties['name']
         if file_dir and file_properties:
             self.update_dir( file_dir )
             with self.con:
@@ -33,7 +32,6 @@ class pysync_sql(object):
                     cur.execute('INSERT INTO \"' + file_dir + '\"(name, modified_by, modified_on, created, modified) VALUES(' + values + ')')
                 else:
                     update = ( file_properties['modified_by'], file_properties['modified_on'], file_properties['modified'], file_properties['name'] )
-                    print update
                     cur.execute('UPDATE \"' + file_dir + '\" SET modified_by=?, modified_on=?, modified=? WHERE name=?', update )
         self.con.commit()
 
@@ -184,9 +182,9 @@ class pysync_server(object):
             # Set the date to after it was finished being writin
             data['modified'] = str(datetime.now())
             # Update the sql
-            self.sql = pysync_sql( dbname=self.pysync_dir+'.pysyncfiles' )
-            self.sql.update_file( data )
-            self.sql.con.close()
+            sql = pysync_sql( dbname=self.pysync_dir+'.pysyncfiles' )
+            sql.update_file( data )
+            sql.con.close()
             print "Updated sql for complete_file %s " % data['name']
         elif data['type'] == "get_db":
             return self.create_file_packet( self.pysync_dir+'.pysyncfiles', str(datetime.utcnow())[:7] )
@@ -195,9 +193,9 @@ class pysync_server(object):
         elif data['type'] == "delete_file":
             try:
                 os.remove( self.pysync_dir+data['file_path'] )
-                self.sql = pysync_sql( dbname=self.pysync_dir+'.pysyncfiles' )
-                self.sql.delete_file( data['file_dir'], data['file_name'] )
-                self.sql.con.close()
+                sql = pysync_sql( dbname=self.pysync_dir+'.pysyncfiles' )
+                sql.delete_file( data['file_dir'], data['file_name'] )
+                sql.con.close()
             except:
                 pass
         return "OK"
@@ -322,16 +320,16 @@ class pysync_server(object):
                 self.compare_file( directory + item )
  
     def compare_file( self, file_path ):
-        self.sql = pysync_sql( dbname=self.pysync_dir+'.pysyncfiles' )
+        sql = pysync_sql( dbname=self.pysync_dir+'.pysyncfiles' )
         file_packet = self.create_file_packet( file_path, contents=False, make_json=False )
         # Dont check the database file
-        if (os.name == 'nt' and self.sql.dbname.split('\\')[-1] == file_packet['name']) or self.sql.dbname.split('/')[-1] == file_packet['name']:
+        if (os.name == 'nt' and sql.dbname.split('\\')[-1] == file_packet['name']) or sql.dbname.split('/')[-1] == file_packet['name']:
             return False
         # Get the sql record for the file
-        sql_record = self.sql.get_file( file_packet['file_dir'], file_packet['name'] )
+        sql_record = sql.get_file( file_packet['file_dir'], file_packet['name'] )
         # No sql record, create one
         if not sql_record:
-            self.sql.update_file( file_packet['file_dir'], file_packet )
+            sql.update_file( file_packet['file_dir'], file_packet )
             print "Created sql", file_packet['name']
         # Sql record present
         else:
@@ -341,12 +339,12 @@ class pysync_server(object):
             # Check if the actual file was modified more recently
             if sql_record['modified'] < file_packet['modified']:
                 print "\t", sql_record['modified'], "<",file_packet['modified']
-                self.sql.update_file( file_packet['file_dir'], file_packet )
+                sql.update_file( file_packet['file_dir'], file_packet )
                 print "Updated sql", file_packet['name']
-        self.sql.con.close()
+        sql.con.close()
 
     def get_server_updates( self, server_props ):
-        self.sql = pysync_sql( dbname=self.pysync_dir+'.pysyncfiles' )
+        sql = pysync_sql( dbname=self.real_path( '/','.pysyncfiles') )
         if server_props:
             self.pysync_server_address = server_props['address']
             self.pysync_server_port = server_props['port']
@@ -355,14 +353,16 @@ class pysync_server(object):
         packet = self.encode( str(datetime.utcnow())[:7], json.dumps(packet) )
         response = self.send( packet )
         if response:
+            sync_with_path = self.real_path( '/','.sync_with')
+            if os.path.exists( sync_with_path ):
+                os.remove( sync_with_path )
             sync_with = self.unpack_packet( response, str(datetime.utcnow())[:7] )
             sync_with['name'] = '.sync_with'
             self.write_file( sync_with )
-            sync_with_path = self.real_path( '/','.sync_with')
             sync_with = pysync_sql( dbname=sync_with_path )
             # Get all files from each
             server_files = sync_with.all_files()
-            myfiles = self.sql.all_files()
+            myfiles = sql.all_files()
             for my_file in myfiles:
                 server_file = sync_with.get_file( my_file['file_dir'].replace('/','\\'), my_file['name'] ) or sync_with.get_file( my_file['file_dir'].replace('\\','/'), my_file['name'] )
                 my_file['file_path'] = self.real_path( my_file['file_dir'], my_file['name'] )
@@ -375,12 +375,13 @@ class pysync_server(object):
                         self.send_file( my_file['file_path'] )
                         print "Sent updated: ", my_file['name']
                 else:
-                    print server_file, self.real_path(my_file['file_dir'], my_file['name'] )
                     # Server doesn't have the file
                     self.send_file( my_file['file_path'] )
                     print "Sent original: ", my_file['name']
+            sync_with.con.close()
+            os.remove( sync_with_path )
             for server_file in server_files:
-                my_file = self.sql.get_file( server_file['file_dir'].replace('/','\\'), server_file['name'] ) or self.sql.get_file( server_file['file_dir'].replace('\\','/'), server_file['name'] )
+                my_file = sql.get_file( server_file['file_dir'].replace('/','\\'), server_file['name'] ) or sql.get_file( server_file['file_dir'].replace('\\','/'), server_file['name'] )
                 # Check if client has the file
                 if my_file:
                     my_file['modified'] = datetime.strptime(my_file['modified'].split('.')[0], "%Y-%m-%d %H:%M:%S")
@@ -396,10 +397,9 @@ class pysync_server(object):
                         # Set the date to after it was finished being writin
                         server_file['modified'] = str(datetime.now())
                         # Update the sql for the file
-                        self.sql.update_file( server_file )
+                        sql.update_file( server_file['file_dir'], server_file )
                         print "Updated from server ", server_file['name'], server_file['modified_on']
-                        my_file = self.sql.get_file( server_file['file_dir'].replace('/','\\'), server_file['name'] ) or self.sql.get_file( server_file['file_dir'].replace('\\','/'), server_file['name'] )
-                        print "Became ", my_file['name'], my_file['modified_on']
+                        my_file = sql.get_file( server_file['file_dir'].replace('/','\\'), server_file['name'] ) or sql.get_file( server_file['file_dir'].replace('\\','/'), server_file['name'] )
                 else:
                     print "\tLocal version not present"
                     # Request the file from the server
@@ -410,11 +410,9 @@ class pysync_server(object):
                     # Set the date to after it was finished being writin
                     server_file['modified'] = str(datetime.now())
                     # Update the sql for the file
-                    self.sql.update_file( server_file )
+                    sql.update_file( server_file['file_dir'], server_file )
                     print "Created from server ", server_file['name'], server_file['modified_on']
-            sync_with.con.close()
-            self.sql.con.close()
-            os.remove( sync_with_path )
+            sql.con.close()
 
     def real_path( self, file_dir, file_name ):
         if os.name == 'nt':
@@ -537,16 +535,16 @@ def watch( watch_host, watch_lock ):
                 continue
         else:
             os.makedirs( server.pysync_dir )
-        try:
-            server.get_server_updates( change )
-        except Exception, e:
-            print e
-            try:
-                watch_host.send( e.function )
-            except:
-                pass
-            time.sleep(5)
-            continue
+        #try:
+        server.get_server_updates( change )
+        #except Exception, e:
+        #    print e
+        ##    try:
+         #       watch_host.send( e.function )
+         #   except:
+         #       pass
+         #   time.sleep(5)
+         #   continue
         time.sleep(5)
 
 def set_host_parms( host=False ):
