@@ -535,16 +535,16 @@ def watch( watch_host, watch_lock ):
                 continue
         else:
             os.makedirs( server.pysync_dir )
-        #try:
-        server.get_server_updates( change )
-        #except Exception, e:
-        #    print e
-        ##    try:
-         #       watch_host.send( e.function )
-         #   except:
-         #       pass
-         #   time.sleep(5)
-         #   continue
+        try:
+            server.get_server_updates( change )
+        except Exception, e:
+            print e
+            try:
+                watch_host.send( e.function )
+            except:
+                pass
+            time.sleep(5)
+            continue
         time.sleep(5)
 
 def set_host_parms( host=False ):
