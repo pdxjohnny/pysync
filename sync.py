@@ -1,6 +1,6 @@
 #! /usr/bin/python
 # -*- coding: utf-8 -*-
-import socket, sys, json, os, time, sqlite3, pprint, SocketServer, signal, base64, ctypes, struct, urllib, traceback
+import socket, sys, json, os, time, sqlite3, pprint, SocketServer, signal, base64, ctypes, struct, urllib, traceback, ssl
 from datetime import datetime, timedelta
 from multiprocessing import Process, Pipe, Lock, freeze_support
 if os.name != 'nt':
@@ -136,6 +136,8 @@ class pysync_server(object):
         self.my_port = my_port
         self.pysync_server_address = my_address
         self.pysync_server_port = my_port
+        key_dir = os.path.dirname(__file__)
+        self.ssl_cert = os.path.join(key_dir, 'server.crt')
         if not pysync_dir:
             if os.name == 'nt':
                 self.pysync_dir = os.path.abspath( os.path.expanduser("~") + "\\pysync\\" ) + "\\"
@@ -166,6 +168,9 @@ class pysync_server(object):
     def change_host( self, change_host=False ):
         print "Testing connection to host..."
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock = ssl.wrap_socket(sock,
+                           ca_certs=self.ssl_cert,
+                           cert_reqs=ssl.CERT_REQUIRED)
         test_con = (change_host['address'], change_host['port'])
         sock.connect( test_con )
         if self.change_host_pipe.poll():
@@ -177,6 +182,9 @@ class pysync_server(object):
         if self.pysync_server_address == '0.0.0.0' or self.pysync_server_address == self.get_lan_ip():
             return False
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock = ssl.wrap_socket(sock,
+                           ca_certs=self.ssl_cert,
+                           cert_reqs=ssl.CERT_REQUIRED)
         server = (self.pysync_server_address, self.pysync_server_port)
         #print "Sending to ", server
         try:
@@ -274,9 +282,9 @@ class pysync_server(object):
     <meta name="viewport" content="width=device-width, initial-scale=1">
 
     <link rel="shortcut icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAABy0lEQVRYR2NkGGDAOMD2M4w6YDQERkNgcIaAcegqfmLKh7Orwz5iU4dPP7oerCFgF7H0PzEOAKp5dmhFtDSyWmL0AvXA7cXqAMfYlcQ6gOEPC6PY4flhr0GOIEXf/sXhYLsxHOCSuK6QkZGhj8gQACvbPS+I0TVpHbqjPwGlQBgE+KAYbixID1YHeKRvwvD9jpl+cIdik//PyBDH+J9hEbKjCemByWOEgHfONgwHbJ3iBVbnkLWKh5uJ5zOyRf///89hZGScQmyIwcyCqcdwgF/hLhQHADmnNve7mYM0+Bbu+g3UwIJs2aZ+N0Z0PXgdw8hUtanPpR2rAwJL9xUCUwVJ8b++ywnsicCyfUQnXJgejDQQUn2IaENAmte02qGEILH6kfWhGBDecJxoB6xssATrxaYHJkeMPIoDolpPo8f/XWAim4Qcp4yMTP+XV5tMhomh6wGJL6s2hZtLSB6uMLbrQiEDw3+U+F9cZkiwrojtOv8HaCczsbkA3Uy4BQn9lzGCf0GhLkEHgCzGpheLgz4AzRNEF4dbkDzlOoYD5uZoEuWApEnXixmZGHpwhcJfRkbPBdkaO7DJE2UBscFLjrpRB4yGwGgIjIYAAFvsmiFDG+h+AAAAAElFTkSuQmCC" />
-    <link rel="stylesheet" href="http://code.jquery.com/mobile/1.4.3/jquery.mobile-1.4.3.min.css" />
-    <script src="http://code.jquery.com/jquery-1.11.1.min.js"></script>
-    <script src="http://code.jquery.com/mobile/1.4.3/jquery.mobile-1.4.3.min.js"></script>
+    <link rel="stylesheet" href="https://code.jquery.com/mobile/1.4.3/jquery.mobile-1.4.3.min.css" />
+    <script src="https://code.jquery.com/jquery-1.11.1.min.js"></script>
+    <script src="https://code.jquery.com/mobile/1.4.3/jquery.mobile-1.4.3.min.js"></script>
 </head>
 <body>
 ''',
@@ -341,8 +349,7 @@ html{ font-family: "Myriad Set Pro","Lucida Grande","Helvetica Neue","Helvetica"
             sql.con.close()
             if request_file:
                 output.insert(2, '''
-<li><a href="#popupDialog" data-rel="popup" data-position-to="window" data-transition="pop" >Delete</a></li>
-<div data-role="popup" id="popupDialog" data-dismissible="false" style="max-width:400px;">
+<li><a href="#popupDialog" data-rel="popup" data-position-to="window" data-transition="pop" >Delete</a></li> <div data-role="popup" id="popupDialog" data-dismissible="false" style="max-width:400px;">
     <div data-role="header" data-theme="a">
     <h1>Delete File?</h1>
     </div>
@@ -666,7 +673,22 @@ html{ font-family: "Myriad Set Pro","Lucida Grande","Helvetica Neue","Helvetica"
                 except IOError:
                     pass
         return ip
- 
+
+class SSLTCPServer(SocketServer.TCPServer):
+    def __init__(self, server_address, RequestHandlerClass, bind_and_activate=True):
+        """Constructor. May be extended, do not override."""
+        SocketServer.TCPServer.__init__(self, server_address, RequestHandlerClass, False)
+
+        key_dir = os.path.dirname(__file__)
+        key_file = os.path.join(key_dir, 'server.key')
+        cert_file = os.path.join(key_dir, 'server.crt')
+
+        self.socket = ssl.wrap_socket(self.socket, keyfile=key_file, certfile=cert_file, cert_reqs=ssl.CERT_NONE)
+
+        if bind_and_activate:
+            self.server_bind()
+            self.server_activate()
+
 class pysync_connection_handler(SocketServer.BaseRequestHandler):
     def handle(self):
         server = pysync_server()
@@ -712,7 +734,7 @@ def am_i_host( make_host ):
         time.sleep(10)
  
 def start_server():
-    server.socket_server = SocketServer.TCPServer((server.pysync_server_address, server.pysync_server_port), pysync_connection_handler)
+    server.socket_server = SSLTCPServer((server.pysync_server_address, server.pysync_server_port), pysync_connection_handler)
     server.socket_server.serve_forever()
  
 def watch( watch_host, watch_lock ):
@@ -768,8 +790,8 @@ def set_host_parms( host=False ):
             try:
                 server.change_host( host )
                 error = False
-            except:
-                print "[  FAIL ] Failed to connect"
+            except Exception, e:
+                print "[  FAIL ] Failed to connect: ", e
                 host = raw_input('Host (if this is the host type \'me\'): ')
 
 def changing_server_address( pipe, kill_me ):
