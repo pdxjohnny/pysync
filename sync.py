@@ -18,7 +18,7 @@ class pysync_sql(object):
                 cur = self.con.cursor()
                 cur.execute('SELECT name FROM sqlite_master WHERE type=\"table\" AND name=\"' + file_dir + '\"')
                 if len(cur.fetchall()) < 1:
-                    cur.execute('CREATE TABLE \"' + file_dir + '\"(id integer primary key AUTOINCREMENT, name TEXT, modified_by TEXT, modified_on TEXT, created datetime, modified datetime)')
+                    cur.execute('CREATE TABLE \"' + file_dir + '\"(id integer primary key AUTOINCREMENT, name TEXT, modified_by TEXT, modified_on TEXT, created datetime, modified datetime, status TEXT)')
                     self.con.commit()
  
     def update_file( self, file_dir=False, file_properties=False ):
@@ -42,7 +42,7 @@ class pysync_sql(object):
         file_dir = file_dir.replace('\\','/')
         with self.con:
             cur = self.con.cursor()
-            cur.execute('DELETE FROM ? where name=?', ( file_dir, file_name ) )
+            cur.execute('DELETE FROM \"' + file_dir + '\" where name=\"' + file_name + '\"')
             self.con.commit()
 
     def all_dirs( self ):
@@ -171,7 +171,7 @@ class pysync_server(object):
         if self.change_host_pipe.poll():
             self.change_host_pipe.recv()
         self.change_host_pipe.send(change_host)
-        print "[ OK ] Host changed"
+        print "[   OK  ] Host changed"
 
     def send( self, data ):
         if self.pysync_server_address == '0.0.0.0' or self.pysync_server_address == self.get_lan_ip():
@@ -202,7 +202,7 @@ class pysync_server(object):
             sock.close()
         if received:
             return received
- 
+
     def handle_input( self, data ):
         if type(data) is bool:
             return str(self.BAD_REQUEST)
@@ -237,7 +237,7 @@ class pysync_server(object):
         elif data['type'] == "get_db":
             return self.create_file_packet( self.real_path('/','.pysyncfiles'), str(datetime.utcnow())[:7] )
         elif data['type'] == "get_file":
-            return self.create_file_packet( self.pysync_dir+data['file_path'], str(datetime.utcnow())[:7] )
+            return self.create_file_packet( self.real_path( data['file_dir'], data['name'] ), str(datetime.utcnow())[:7] )
         elif data['type'] == "update_sql":
             sql = pysync_sql( dbname=self.real_path('/','.pysyncfiles') )
             print "Before sql update", sql.get_file( data['file_dir'], data['name'] )['modified_on']
@@ -431,8 +431,12 @@ html{ font-family: "Myriad Set Pro","Lucida Grande","Helvetica Neue","Helvetica"
                 'modified_on': socket.gethostname()
                 }
             if contents:
-                with open( file_path, 'rb' ) as file_contents:
-                    file_packet['contents'] = base64.b64encode(''.join(file_contents))
+                try:
+                    with open( file_path, 'rb' ) as file_contents:
+                        file_packet['contents'] = base64.b64encode(''.join(file_contents))
+                except Exception, e:
+                    print "[ ERROR ] File not found: ", file_dir, file_name
+                    return False
             if make_json:
                 file_packet = json.dumps( file_packet )
             if key:
@@ -453,8 +457,9 @@ html{ font-family: "Myriad Set Pro","Lucida Grande","Helvetica Neue","Helvetica"
                 pass
         return packet
  
-    def send_file( self, file_path ):
-        file_packet = self.create_file_packet( file_path, str(datetime.utcnow())[:7] )
+    def send_file( self, file_path=False, file_packet=False ):
+        if not file_packet:
+            file_packet = self.create_file_packet( file_path, str(datetime.utcnow())[:7] )
         if file_packet:
             res = self.send( file_packet )
             if res and res[:5] != "ERROR":
@@ -520,45 +525,79 @@ html{ font-family: "Myriad Set Pro","Lucida Grande","Helvetica Neue","Helvetica"
             server_files = sync_with.all_files()
             myfiles = sql.all_files()
             for my_file in myfiles:
-                server_file = sync_with.get_file( my_file['file_dir'], my_file['name'] )
-                my_file['file_path'] = self.real_path( my_file['file_dir'], my_file['name'] )
-                # Check if the file is on the server
-                if server_file:
-                    my_file['modified'] = datetime.strptime(my_file['modified'].split('.')[0], "%Y-%m-%d %H:%M:%S")
-                    server_file['modified'] = datetime.strptime(server_file['modified'].split('.')[0], "%Y-%m-%d %H:%M:%S")
-                    # Check if our version is newer than the servers
-                    if server_file['modified'] < my_file['modified']:
+                try:
+                    server_file = sync_with.get_file( my_file['file_dir'], my_file['name'] )
+                    my_file['file_path'] = self.real_path( my_file['file_dir'], my_file['name'] )
+                    # Check if the file is on the server
+                    if server_file:
+                        my_file['modified'] = datetime.strptime(my_file['modified'].split('.')[0], "%Y-%m-%d %H:%M:%S")
+                        server_file['modified'] = datetime.strptime(server_file['modified'].split('.')[0], "%Y-%m-%d %H:%M:%S")
+                        # Check if our version is newer than the servers
+                        if server_file['modified'] < my_file['modified']:
+                            # Get back the time the file was writin on server and set that in our db
+                            print "Sent updated: ", my_file['name'], my_file['modified'],
+                            update_file = self.create_file_packet( my_file['file_path'] )
+                            if not update_file:
+                                sql.delete_file( my_file['file_dir'], my_file['name'] )
+                                print "[  LOG  ] Deleted file: ", my_file['file_dir'], my_file['name']
+                                continue
+                            update_file = self.send_file( file_packet=update_file )
+                            update_file = self.unpack_packet( update_file, str(datetime.utcnow())[:7] )
+                            sql.update_file( update_file['file_dir'], update_file )
+                            print "\n\trecived at ", update_file['modified'].split('.')[0]
+                            update_file = sql.get_file( update_file['file_dir'], update_file['name'] )
+                            print "Local sql record is now at ", update_file['modified'].split('.')[0]
+                    else:
+                        # Server doesn't have the file
+                        print "Sent original: ", my_file['name'], my_file['modified'],
                         # Get back the time the file was writin on server and set that in our db
-                        print "Sent updated: ", my_file['name'], my_file['modified'],
-                        update_file = self.send_file( my_file['file_path'] )
+                        update_file = self.create_file_packet( my_file['file_path'] )
+                        if not update_file:
+                            sql.delete_file( my_file['file_dir'], my_file['name'] )
+                            print "[  LOG  ] Deleted file: ", my_file['file_dir'], my_file['name']
+                            continue
+                        update_file = self.send_file( file_packet=update_file )
                         update_file = self.unpack_packet( update_file, str(datetime.utcnow())[:7] )
                         sql.update_file( update_file['file_dir'], update_file )
                         print "\n\trecived at ", update_file['modified'].split('.')[0]
                         update_file = sql.get_file( update_file['file_dir'], update_file['name'] )
-                        print "Local sql record is now at ", update_file['modified'].split('.')[0]
-                else:
-                    # Server doesn't have the file
-                    print "Sent original: ", my_file['name'], my_file['modified'],
-                    # Get back the time the file was writin on server and set that in our db
-                    update_file = self.send_file( my_file['file_path'] )
-                    update_file = self.unpack_packet( update_file, str(datetime.utcnow())[:7] )
-                    sql.update_file( update_file['file_dir'], update_file )
-                    print "\n\trecived at ", update_file['modified'].split('.')[0]
-                    update_file = sql.get_file( update_file['file_dir'], update_file['name'] )
-                    print "Local sql record is now at ", update_file['modified']
+                        print "Local sql record is now at ", update_file['modified']
+                except Exception, e:
+                    print "[ ERROR ] While compairing local db to server: ", e
             sync_with.con.close()
             os.remove( sync_with_path )
             for server_file in server_files:
-                my_file = sql.get_file( server_file['file_dir'], server_file['name'] )
-                # Check if client has the file
-                if my_file:
-                    my_file['modified'] = datetime.strptime(my_file['modified'].split('.')[0], "%Y-%m-%d %H:%M:%S")
-                    server_file['modified'] = datetime.strptime(server_file['modified'].split('.')[0], "%Y-%m-%d %H:%M:%S")
-                    # If it was modified elsewhere more recently and that place was not the clients computer
-                    if my_file['modified'] < server_file['modified'] and server_file['modified_on'] != socket.gethostname():
-                        print "\t", my_file['modified'],  "<",server_file['modified'], "\n\t",server_file['modified_on'], "!=",socket.gethostname()
+                try:
+                    my_file = sql.get_file( server_file['file_dir'], server_file['name'] )
+                    # Check if client has the file
+                    if my_file:
+                        my_file['modified'] = datetime.strptime(my_file['modified'].split('.')[0], "%Y-%m-%d %H:%M:%S")
+                        server_file['modified'] = datetime.strptime(server_file['modified'].split('.')[0], "%Y-%m-%d %H:%M:%S")
+                        # If it was modified elsewhere more recently and that place was not the clients computer
+                        if my_file['modified'] < server_file['modified'] and server_file['modified_on'] != socket.gethostname():
+                            print "\t", my_file['modified'],  "<",server_file['modified'], "\n\t",server_file['modified_on'], "!=",socket.gethostname()
+                            # Request the file from the server
+                            packet = {'type': 'get_file', 'file_dir': server_file['file_dir'], 'name': server_file['name'] }
+                            packet = self.encode( str(datetime.utcnow())[:7], json.dumps(packet) )
+                            server_file = self.unpack_packet( self.send( packet ), str(datetime.utcnow())[:7] )
+                            self.write_file( server_file )
+                            # Set the date to after it was finished being writin
+                            server_modified_time = server_file['modified']
+                            server_file['modified'] = str(datetime.now())
+                            # Update the sql for the file
+                            sql.update_file( server_file['file_dir'], server_file )
+                            # Send back to the server to tell it when our file was writen
+                            del server_file['contents']
+                            server_file['modified_on'] = socket.gethostname()
+                            server_file['type'] = 'update_sql'
+                            server_file['modified'] = server_modified_time
+                            updated_server_file = self.encode( str(datetime.utcnow())[:7], json.dumps( server_file ) )
+                            self.send( updated_server_file )
+                            print "Updated from server ", server_file['name'], server_file['modified_on']
+                    else:
+                        print "\tLocal version not present"
                         # Request the file from the server
-                        packet = {'type': 'get_file', 'file_path': server_file['file_dir'] + server_file['name'] }
+                        packet = {'type': 'get_file', 'file_dir': server_file['file_dir'], 'name': server_file['name'] }
                         packet = self.encode( str(datetime.utcnow())[:7], json.dumps(packet) )
                         server_file = self.unpack_packet( self.send( packet ), str(datetime.utcnow())[:7] )
                         self.write_file( server_file )
@@ -570,31 +609,13 @@ html{ font-family: "Myriad Set Pro","Lucida Grande","Helvetica Neue","Helvetica"
                         # Send back to the server to tell it when our file was writen
                         del server_file['contents']
                         server_file['modified_on'] = socket.gethostname()
-                        server_file['type'] = 'update_sql'
                         server_file['modified'] = server_modified_time
+                        server_file['type'] = 'update_sql'
                         updated_server_file = self.encode( str(datetime.utcnow())[:7], json.dumps( server_file ) )
                         self.send( updated_server_file )
-                        print "Updated from server ", server_file['name'], server_file['modified_on']
-                else:
-                    print "\tLocal version not present"
-                    # Request the file from the server
-                    packet = {'type': 'get_file', 'file_path': server_file['file_dir'] + server_file['name'] }
-                    packet = self.encode( str(datetime.utcnow())[:7], json.dumps(packet) )
-                    server_file = self.unpack_packet( self.send( packet ), str(datetime.utcnow())[:7] )
-                    self.write_file( server_file )
-                    # Set the date to after it was finished being writin
-                    server_modified_time = server_file['modified']
-                    server_file['modified'] = str(datetime.now())
-                    # Update the sql for the file
-                    sql.update_file( server_file['file_dir'], server_file )
-                    # Send back to the server to tell it when our file was writen
-                    del server_file['contents']
-                    server_file['modified_on'] = socket.gethostname()
-                    server_file['modified'] = server_modified_time
-                    server_file['type'] = 'update_sql'
-                    updated_server_file = self.encode( str(datetime.utcnow())[:7], json.dumps( server_file ) )
-                    self.send( updated_server_file )
-                    print "Created from server ", server_file['name'], server_file['modified_on']
+                        print "Created from server ", server_file['name'], server_file['modified_on']
+                except Exception, e:
+                    print "[ ERROR ] While compairing server db to local: ", e
             sql.con.close()
 
     def real_path( self, file_dir, file_name ):
@@ -743,12 +764,12 @@ def set_host_parms( host=False ):
             try:
                 host = { 'address': host.split(':')[0], 'port': int(host.split(':')[1]) }
             except:
-                print "[ FAIL ] Host in form of address:port, default port is 3639"
+                print "[  FAIL ] Host in form of address:port, default port is 3639"
             try:
                 server.change_host( host )
                 error = False
             except:
-                print "[ FAIL ] Failed to connect"
+                print "[  FAIL ] Failed to connect"
                 host = raw_input('Host (if this is the host type \'me\'): ')
 
 def changing_server_address( pipe, kill_me ):
