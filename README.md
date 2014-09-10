@@ -1,18 +1,19 @@
-Py Sync
+PySync
 ======
 
-Similar syncs files over local networks always keeping one node as the server.
+Syncs files over local networks or to server with accessible port always keeping one node as the server.
 If the server node fails all node got ot the next server in the queue.
 
-Contains:
-  Web viewer
-  Syncing
+To use you first have to generate the SSL and key files, input passwords and info as prompted
+```
+openssl genrsa -des3 -out server.orig.key 2048
+openssl rsa -in server.orig.key -out server.key
+openssl req -new -key server.key -out server.csr
+openssl x509 -req -days 365 -in server.csr -signkey server.key -out server.crt
+```
 
-Bugs:
-  Files go back and forth a few times when syncing
-
-To Do:
-  Server queue
-  Downloading files
-  Web interface encyption - ssl
-  Sign in and keys
+|Contains|To Do|Bugs|
+|---|---|---|
+| Web viewer| Node Queue| Files transfer mulitiple times|
+| Syncing| Downloads||
+| SSL| Sign in||
