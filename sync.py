@@ -1,6 +1,6 @@
 #! /usr/bin/python
 # -*- coding: utf-8 -*-
-import socket, sys, json, os, time, sqlite3, pprint, SocketServer, signal, base64, ctypes, struct, urllib, traceback, ssl
+import socket, sys, json, os, time, sqlite3, pprint, SocketServer, signal, base64, ctypes, struct, urllib, traceback, ssl, Cookie, argparse, getpass, random
 from datetime import datetime, timedelta
 from multiprocessing import Process, Pipe, Lock, freeze_support
 if os.name != 'nt':
@@ -11,6 +11,12 @@ class pysync_sql(object):
     def __init__( self, dbname=".pysyncfiles" ):
         self.dbname = dbname
         self.con = sqlite3.connect( self.dbname )
+        with self.con:
+            cur = self.con.cursor()
+            cur.execute('SELECT name FROM sqlite_master WHERE type=\"table\" AND name=\"pysync_users\"')
+            if len(cur.fetchall()) < 1:
+                cur.execute('CREATE TABLE \"pysync_users\"(username TEXT, password TEXT, pysync_key TEXT)')
+                self.con.commit()
  
     def update_dir( self, file_dir=False ):
         if file_dir:
@@ -45,10 +51,21 @@ class pysync_sql(object):
             cur.execute('DELETE FROM \"' + file_dir + '\" where name=\"' + file_name + '\"')
             self.con.commit()
 
+    def exists( self, table, column, should_be ):
+        with self.con:
+            cur = self.con.cursor()
+            cur.execute('SELECT \"' + column + '\" FROM \"' + table + '\" WHERE \"' + column + '\"=\"' + should_be + '\"')
+            if len(cur.fetchall()) < 1:
+                return True
+            else:
+                return False
+        self.con.commit()
+        self.con.close()
+
     def all_dirs( self ):
         with self.con:
             cur = self.con.cursor()
-            cur.execute('SELECT name FROM sqlite_master WHERE type=\"table\" AND NOT name=\"sqlite_sequence\"')
+            cur.execute('SELECT name FROM sqlite_master WHERE type=\"table\" AND NOT name=\"sqlite_sequence\" AND NOT name=\"pysync_users\"')
             dirs = [ file_dir[0] for file_dir in cur.fetchall() ]
             self.con.commit()
             return dirs
@@ -216,7 +233,7 @@ class pysync_server(object):
             return str(self.BAD_REQUEST)
         try:
             if 'GET' in data or 'POST' in data:
-                return self.http_server( data )
+                return self.https_server( data )
         except Exception, e:
             print e
             traceback.print_exc()
@@ -225,8 +242,8 @@ class pysync_server(object):
         except:
             try:
                 data = self.unpack_packet( data )
-            except:
-                return "[ ERROR ] Couldn't unpack either way"
+            except Exception, e:
+                return "[ ERROR ] Couldn't unpack either way", e
         if data['type'] == "complete_file" and data['modified_on'] != socket.gethostname():
             # Write the file
             self.write_file( data )
@@ -252,26 +269,28 @@ class pysync_server(object):
             sql.update_file( data['file_dir'], data )
             print "After sql update", sql.get_file( data['file_dir'], data['name'] )['modified_on']
             sql.con.close()
-        elif data['type'] == "delete_file":
-            try:
-                os.remove( self.pysync_dir+data['file_path'] )
-                sql = pysync_sql( dbname=self.real_path('/','.pysyncfiles') )
-                sql.delete_file( data['file_dir'], data['file_name'] )
-                sql.con.close()
-            except:
-                pass
+        #elif data['type'] == "delete_file":
+        #    try:
+        #        os.remove( self.pysync_dir+data['file_path'] )
+        #        sql = pysync_sql( dbname=self.real_path('/','.pysyncfiles') )
+        #        sql.delete_file( data['file_dir'], data['file_name'] )
+        #        sql.con.close()
+        #    except:
+        #        pass
         return "OK"
 
-    def http_server( self, data ):
+    def https_server( self, data ):
         if type(data) is bool:
             return self.BAD_REQUEST
         elif 'GET' in data:
             page = data[data.index('GET')+4 : data.index('HTTP')-1]
         elif 'POST' in data:
             page = data[data.index('POST')+5 : data.index('HTTP')-1]
+            return self.https_post_response( page, data )
         else:
             return self.BAD_REQUEST
-        page = urllib.unquote( page ).decode('utf8') 
+        page = urllib.unquote( page ).decode('utf8')
+        cookies = self.get_cookies( data )
         output = [
 '''
 <!DOCTYPE html>
@@ -367,8 +386,66 @@ html{ font-family: "Myriad Set Pro","Lucida Grande","Helvetica Neue","Helvetica"
                     output.insert(2, '\n<li data-role="list-divider" >'+str(prop)+'</li>')
         headers = "HTTP/1.1 200 OK\n"
         headers += "Content length: %d\n" % len(''.join(output))
-        headers += "Content-Type: text/html\n\n"
+        headers += "Content-Type: text/html\n"
+        #headers += "Set-Cookie: host="+socket.gethostname()+"; expires="+str(datetime.utcnow()+timedelta(days=1)).split('.')[0]+"; secure\n\n"
         return headers + ''.join(output)
+
+    def https_post_response( self, page, data ):
+        cookies = self.get_cookies( data )
+        form_data = self.get_form_data( data )
+        output = []
+        sql = pysync_sql( dbname=self.real_path('/','.pysyncfiles') )
+        if 'username' in form_data and 'password' in form_data:
+            with sql.con:
+                cur = sql.con.cursor()
+                cur.execute('SELECT username FROM pysync_users WHERE username=\"' + form_data['username'] + '\" AND password=\"' + form_data['password'] + '\"')
+                if len(cur.fetchall()) is 1:
+                    print '[  LOG  ]  User \"' + form_data['username'] + '\" logded in'
+                    pysync_key = self.encode( str(random.random()), form_data['username']*3 )
+                    output.append( json.dumps({'login': 'OK'}) )
+                    output.insert(0, "Set-Cookie: pysync_key="+pysync_key+"; expires="+str(datetime.utcnow()+timedelta(days=1)).split('.')[0]+"; secure\n\n" )
+                    cur.execute('UPDATE pysync_users SET pysync_key=\"' + pysync_key + '\" WHERE username=\"' + form_data['username'] + '\" AND password=\"' + form_data['password'] + '\"')
+                else:
+                    output.append( json.dumps({'login': 'FAIL'}) )
+        elif 'pysync_key' in cookies and 'download' in form_data and 'username' in form_data:
+            with sql.con:
+                cur = sql.con.cursor()
+                cur.execute('SELECT pysync_key FROM pysync_users WHERE username=\"' + form_data['username'] + '\"')
+                if cookies['pysync_key'] == cur.fetchall()[0][0]:
+                    output.append( json.dumps({'download': 'DATA', 'pysync_key': 'OK'}) )
+                else:
+                    output.append( json.dumps({'download': 'FAIL', 'pysync_key': 'FAIL'}) )
+                output.insert(0, "\n" )
+        sql.con.commit()
+        sql.con.close()
+        headers = "HTTP/1.1 200 OK\n"
+        headers += "Content length: %d\n" % len(''.join(output))
+        headers += "Content-Type: application/json\n"
+        return headers + ''.join(output)
+
+    def get_cookies( self, data ):
+        cookies = []
+        lines = data.split('\r\n')
+        for line in xrange(0,len(lines)):
+            if "Cookie:" in lines[line]:
+                c = Cookie.SimpleCookie()
+                c.load(lines[line])
+                cookies.append(c)
+        parts = {}
+        for cookie in cookies:
+            for attr in cookie:
+                parts[attr] = cookie[attr].value
+        return parts
+
+    def get_form_data( self, data ):
+        form_data = {}
+        lines = data.split('\r\n')
+        for line in xrange(0,len(lines)):
+            if "Content-Disposition: form-data; " in lines[line]:
+                content = lines[line:line+3]
+                content[0].split('Content-Disposition: form-data; name="')[1][:-1]
+                form_data[content[0].split('Content-Disposition: form-data; name="')[1][:-1]] = content[2]
+        return form_data
  
     def encode( self, key, string ):
         encoded_chars = []
@@ -409,9 +486,9 @@ html{ font-family: "Myriad Set Pro","Lucida Grande","Helvetica Neue","Helvetica"
         if not msg_length:
             return False
         elif 'GET' in msg_length:
-            return msg_length + sock.recv(2048).strip()
+            return msg_length + sock.recv(4048).strip()
         elif 'POST' in msg_length:
-            return msg_length + sock.recv(2048).strip()
+            return msg_length + sock.recv(4048).strip()
         else:
             msg_length = int(msg_length)
         return self.recvall( sock, msg_length )
@@ -654,7 +731,7 @@ html{ font-family: "Myriad Set Pro","Lucida Grande","Helvetica Neue","Helvetica"
 
     def get_lan_ip( self ):
         ip = socket.gethostbyname(socket.gethostname())
-        if ip.startswith("127.") and os.name != "nt":
+        if os.name != "nt":
             interfaces = [
                 "eth0",
                 "eth1",
@@ -673,6 +750,18 @@ html{ font-family: "Myriad Set Pro","Lucida Grande","Helvetica Neue","Helvetica"
                 except IOError:
                     pass
         return ip
+
+    def add_user( self, username ):
+        sql = pysync_sql( dbname=self.real_path('/','.pysyncfiles') )
+        with sql.con:
+            cur = sql.con.cursor()
+            if sql.exists( 'pysync_users', 'username', username ):
+                cur.execute('INSERT INTO pysync_users(username, password, pysync_key) VALUES( ?, ?, ? )', ( username, getpass.getpass('Password for \"' + username + '\": '), socket.gethostname() ) )
+                print 'Created user: \"' + username + '\"'
+            else:
+                print 'User: \"' + username + '\" ' + 'already exists'
+        sql.con.commit()
+        sql.con.close()
 
 class SSLTCPServer(SocketServer.TCPServer):
     def __init__(self, server_address, RequestHandlerClass, bind_and_activate=True):
@@ -806,11 +895,25 @@ def signal_handler(signal, frame):
 
 signal.signal(signal.SIGINT, signal_handler)
 server = pysync_server()
- 
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--log", help="Logs all actions of server and connections")
+parser.add_argument("--port", help="Sets this nodes port if it's the server")
+parser.add_argument("--server", help="Sets this nodes server")
+parser.add_argument("--add_user", help="Adds a user")
+args = parser.parse_args()
+
 if __name__ == '__main__':
+    args = parser.parse_args()
+    if args.add_user:
+        server.add_user( args.add_user )
+        sys.exit(0)
+    if args.port:
+        server.my_port = int( args.port )
     freeze_support()
     server.start()
-    set_host_parms()
+    if args.server:
+        set_host_parms( args.server )
     while True:
         if server.change_host_pipe.poll():
             res = server.change_host_pipe.recv()
