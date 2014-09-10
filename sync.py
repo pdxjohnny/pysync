@@ -1,6 +1,6 @@
 #! /usr/bin/python
 # -*- coding: utf-8 -*-
-import socket, sys, json, os, time, sqlite3, pprint, SocketServer, signal, base64, ctypes, struct, urllib
+import socket, sys, json, os, time, sqlite3, pprint, SocketServer, signal, base64, ctypes, struct, urllib, traceback
 from datetime import datetime, timedelta
 from multiprocessing import Process, Pipe, Lock, freeze_support
 if os.name != 'nt':
@@ -23,6 +23,7 @@ class pysync_sql(object):
  
     def update_file( self, file_dir=False, file_properties=False ):
         if file_dir and file_properties:
+            file_dir = file_dir.replace('\\','/')
             self.update_dir( file_dir )
             with self.con:
                 cur = self.con.cursor()
@@ -38,6 +39,7 @@ class pysync_sql(object):
                 self.con.commit()
 
     def delete_file( self, file_dir, file_name ):
+        file_dir = file_dir.replace('\\','/')
         with self.con:
             cur = self.con.cursor()
             cur.execute('DELETE FROM ? where name=?', ( file_dir, file_name ) )
@@ -56,6 +58,7 @@ class pysync_sql(object):
         all_files = [];
         with self.con:
             if table:
+                table = table.replace('\\','/')
                 cur = self.con.cursor()
                 cur.execute('SELECT * FROM \"' + table + '\"')
                 files = cur.fetchall()
@@ -73,8 +76,7 @@ class pysync_sql(object):
                 for file_dir in dirs:
                     cur = self.con.cursor()
                     cur.execute('SELECT * FROM \"' + file_dir + '\"')
-                    files = cur.fetchall()
-                    for file_properties in files:
+                    for file_properties in cur.fetchall():
                         all_files.append( {
                             'id': file_properties[0],
                             'name': file_properties[1],
@@ -105,6 +107,7 @@ class pysync_sql(object):
             return all_files_by_dir
  
     def get_file( self, file_dir=False, file_name=False ):
+        file_dir = file_dir.replace('\\','/')
         with self.con:
             cur = self.con.cursor()
             try:
@@ -201,11 +204,14 @@ class pysync_server(object):
             return received
  
     def handle_input( self, data ):
+        if type(data) is bool:
+            return str(self.BAD_REQUEST)
         try:
-            if 'GET' in data.split() or 'POST' in data.split():
+            if 'GET' in data or 'POST' in data:
                 return self.http_server( data )
         except Exception, e:
             print e
+            traceback.print_exc()
         try:
             data = self.unpack_packet( data, str(datetime.utcnow())[:7] )
         except:
@@ -249,10 +255,14 @@ class pysync_server(object):
         return "OK"
 
     def http_server( self, data ):
-        if 'GET' in data:
+        if type(data) is bool:
+            return self.BAD_REQUEST
+        elif 'GET' in data:
             page = data[data.index('GET')+4 : data.index('HTTP')-1]
         elif 'POST' in data:
             page = data[data.index('POST')+5 : data.index('HTTP')-1]
+        else:
+            return self.BAD_REQUEST
         page = urllib.unquote( page ).decode('utf8') 
         output = [
 '''
@@ -263,6 +273,7 @@ class pysync_server(object):
 
     <meta name="viewport" content="width=device-width, initial-scale=1">
 
+    <link rel="shortcut icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAABy0lEQVRYR2NkGGDAOMD2M4w6YDQERkNgcIaAcegqfmLKh7Orwz5iU4dPP7oerCFgF7H0PzEOAKp5dmhFtDSyWmL0AvXA7cXqAMfYlcQ6gOEPC6PY4flhr0GOIEXf/sXhYLsxHOCSuK6QkZGhj8gQACvbPS+I0TVpHbqjPwGlQBgE+KAYbixID1YHeKRvwvD9jpl+cIdik//PyBDH+J9hEbKjCemByWOEgHfONgwHbJ3iBVbnkLWKh5uJ5zOyRf///89hZGScQmyIwcyCqcdwgF/hLhQHADmnNve7mYM0+Bbu+g3UwIJs2aZ+N0Z0PXgdw8hUtanPpR2rAwJL9xUCUwVJ8b++ywnsicCyfUQnXJgejDQQUn2IaENAmte02qGEILH6kfWhGBDecJxoB6xssATrxaYHJkeMPIoDolpPo8f/XWAim4Qcp4yMTP+XV5tMhomh6wGJL6s2hZtLSB6uMLbrQiEDw3+U+F9cZkiwrojtOv8HaCczsbkA3Uy4BQn9lzGCf0GhLkEHgCzGpheLgz4AzRNEF4dbkDzlOoYD5uZoEuWApEnXixmZGHpwhcJfRkbPBdkaO7DJE2UBscFLjrpRB4yGwGgIjIYAAFvsmiFDG+h+AAAAAElFTkSuQmCC" />
     <link rel="stylesheet" href="http://code.jquery.com/mobile/1.4.3/jquery.mobile-1.4.3.min.css" />
     <script src="http://code.jquery.com/jquery-1.11.1.min.js"></script>
     <script src="http://code.jquery.com/mobile/1.4.3/jquery.mobile-1.4.3.min.js"></script>
@@ -282,7 +293,7 @@ class pysync_server(object):
     </div><!-- /content -->''','''
 
     <div data-role="footer">
-        <h4>''', '- John Andersen', '''</h4>
+        <h4>''', socket.gethostname(), '''</h4>
     </div><!-- /footer -->
 </div><!-- /page -->''',
 '''
@@ -298,14 +309,22 @@ html{ font-family: "Myriad Set Pro","Lucida Grande","Helvetica Neue","Helvetica"
             sql.con.close()
             for directory in all_dirs:
                 for row in all_dirs[directory]:
-                    output.insert(2, '\n<li><a href="'+directory+row['name']+'" data-transition="flip" >'+directory+row['name']+'</a></li>')
-                output.insert(2, '\n<li data-role="list-divider" >'+directory+'</li>')
+                    output.insert(2, '\n<li><a href="'+directory+row['name']+'" data-transition="flip" >'+row['name']+'</a></li>')
+                output.insert(2, '\n<li data-role="list-divider" ><a href="/'+directory+'" data-transition="flip" >'+directory+'</a></li>')
+        elif page[-1] == '/':
+            table = page[1:]
+            sql = pysync_sql( dbname=self.real_path('/','.pysyncfiles') )
+            all_files = sql.all_files( table )
+            sql.con.close()
+            for row in all_files:
+                output.insert(2, '\n<li><a href="/'+table+row['name']+'" data-transition="flip" >'+row['name']+'</a></li>')
+            output.insert(2, '\n<li data-role="list-divider" ><h1>'+table+'</h1></li>')
         else:
-            if os.name == 'nt':
-                page = page.replace('/','\\')
-            file_dir = ''.join(page.split('/')[:-1]) or ''.join(page.split('\\')[:-1])
+            file_dir = '/'.join(page.split('/')[:-1])
             file_dir += '/'
-            file_name = page.split('/')[-1] or page.split('\\')[-1]
+            file_name = page.split('/')[-1]
+            if len(file_dir) > 1:
+                file_dir = file_dir[1:]
             output[1] = '''
 <div data-role="page" data-dialog="true">
 
@@ -405,7 +424,7 @@ html{ font-family: "Myriad Set Pro","Lucida Grande","Helvetica Neue","Helvetica"
             file_packet = {
                 'type': 'complete_file',
                 'name': file_name,
-                'file_dir': file_dir,
+                'file_dir': file_dir.replace('\\','/'),
                 'created': str(datetime.fromtimestamp( os.path.getctime(file_path) )),
                 'modified': str(datetime.fromtimestamp( os.path.getmtime(file_path) )),
                 'modified_by': self.username,
@@ -460,7 +479,7 @@ html{ font-family: "Myriad Set Pro","Lucida Grande","Helvetica Neue","Helvetica"
         sql = pysync_sql( dbname=self.pysync_dir+'.pysyncfiles' )
         file_packet = self.create_file_packet( file_path, contents=False, make_json=False )
         # Dont check the database file
-        if (os.name == 'nt' and sql.dbname.split('\\')[-1] == file_packet['name']) or sql.dbname.split('/')[-1] == file_packet['name']:
+        if (os.name == 'nt' and sql.dbname.split('\\')[-1] == file_packet['name']) or (sql.dbname.split('/')[-1] == file_packet['name']) or ('.sync_with' == file_packet['name']):
             return False
         # Get the sql record for the file
         sql_record = sql.get_file( file_packet['file_dir'], file_packet['name'] )
@@ -501,7 +520,7 @@ html{ font-family: "Myriad Set Pro","Lucida Grande","Helvetica Neue","Helvetica"
             server_files = sync_with.all_files()
             myfiles = sql.all_files()
             for my_file in myfiles:
-                server_file = sync_with.get_file( my_file['file_dir'].replace('/','\\'), my_file['name'] ) or sync_with.get_file( my_file['file_dir'].replace('\\','/'), my_file['name'] )
+                server_file = sync_with.get_file( my_file['file_dir'], my_file['name'] )
                 my_file['file_path'] = self.real_path( my_file['file_dir'], my_file['name'] )
                 # Check if the file is on the server
                 if server_file:
@@ -515,7 +534,7 @@ html{ font-family: "Myriad Set Pro","Lucida Grande","Helvetica Neue","Helvetica"
                         update_file = self.unpack_packet( update_file, str(datetime.utcnow())[:7] )
                         sql.update_file( update_file['file_dir'], update_file )
                         print "\n\trecived at ", update_file['modified'].split('.')[0]
-                        update_file = sql.get_file( update_file['file_dir'].replace('/','\\'), update_file['name'] ) or sync_with.get_file( update_file['file_dir'].replace('\\','/'), update_file['name'] )
+                        update_file = sql.get_file( update_file['file_dir'], update_file['name'] )
                         print "Local sql record is now at ", update_file['modified'].split('.')[0]
                 else:
                     # Server doesn't have the file
@@ -525,12 +544,12 @@ html{ font-family: "Myriad Set Pro","Lucida Grande","Helvetica Neue","Helvetica"
                     update_file = self.unpack_packet( update_file, str(datetime.utcnow())[:7] )
                     sql.update_file( update_file['file_dir'], update_file )
                     print "\n\trecived at ", update_file['modified'].split('.')[0]
-                    update_file = sql.get_file( update_file['file_dir'].replace('/','\\'), update_file['name'] ) or sync_with.get_file( update_file['file_dir'].replace('\\','/'), update_file['name'] )
+                    update_file = sql.get_file( update_file['file_dir'], update_file['name'] )
                     print "Local sql record is now at ", update_file['modified']
             sync_with.con.close()
             os.remove( sync_with_path )
             for server_file in server_files:
-                my_file = sql.get_file( server_file['file_dir'].replace('/','\\'), server_file['name'] ) or sql.get_file( server_file['file_dir'].replace('\\','/'), server_file['name'] )
+                my_file = sql.get_file( server_file['file_dir'], server_file['name'] )
                 # Check if client has the file
                 if my_file:
                     my_file['modified'] = datetime.strptime(my_file['modified'].split('.')[0], "%Y-%m-%d %H:%M:%S")
@@ -691,6 +710,7 @@ def watch( watch_host, watch_lock ):
                 server.scan_dir( server.pysync_dir )
             except Exception, e:
                 print e
+                traceback.print_exc()
                 try:
                     watch_host.send( e.function )
                 except:
@@ -703,6 +723,7 @@ def watch( watch_host, watch_lock ):
             server.get_server_updates( change )
         except Exception, e:
             print e
+            traceback.print_exc()
             try:
                 watch_host.send( e.function )
             except:
