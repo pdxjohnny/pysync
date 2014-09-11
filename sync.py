@@ -285,10 +285,8 @@ class pysync_server(object):
                 return self.BAD_REQUEST
             elif 'GET' in data:
                 page = data[data.index('GET')+4 : data.index('HTTP')-1]
-                print 'GET', page
             elif 'POST' in data:
                 page = data[data.index('POST')+5 : data.index('HTTP')-1]
-                print 'POST', page
                 return self.https_post_response( page, data )
             else:
                 return self.BAD_REQUEST
@@ -371,6 +369,8 @@ html{ font-family: "Myriad Set Pro","Lucida Grande","Helvetica Neue","Helvetica"
                 for row in all_dirs[directory]:
                     output.insert(2, '\n<li><a href="'+directory+row['name']+'" data-transition="flip" >'+row['name']+'</a></li>')
                 output.insert(2, '\n<li data-role="list-divider" ><a href="/'+directory+'" data-transition="flip" >'+directory+'</a></li>')
+        elif page.startswith( '/download::' ):
+            headers, output = self.download( page.split( '/download::' )[1], cookies )
         elif page[-1] == '/':
             table = page[1:]
             sql = pysync_sql( dbname=self.real_path('/','.pysyncfiles') )
@@ -401,7 +401,18 @@ html{ font-family: "Myriad Set Pro","Lucida Grande","Helvetica Neue","Helvetica"
             sql.con.close()
             if request_file:
                 output.insert(2, '''
-<li><a href="#popupDialog" data-rel="popup" data-position-to="window" data-transition="pop" >Delete</a></li> <div data-role="popup" id="popupDialog" data-dismissible="false" style="max-width:400px;">
+<script>
+function pysync_file_download(){
+    $.post('/download', {'download':\'''' + page + '''\'}, function(retData){
+        var binUrl = retData.url;
+        document.body.innerHTML += "<iframe src='" + binUrl + "' style='display: none;' ></iframe>"
+    });
+}
+</script>
+<li><a href="/download::''' + page + '''" data-ajax="false" target="_blank" >Download</a></li>
+<li><a href="/edit::''' + page + '''" target="_blank" >Edit</a></li>
+<li><a href="#popupDialog" data-rel="popup" data-position-to="window" data-transition="pop" >Delete</a></li>
+<div data-role="popup" id="popupDialog" data-dismissible="false" style="max-width:400px;">
     <div data-role="header" data-theme="a">
     <h1>Delete File?</h1>
     </div>
@@ -409,7 +420,7 @@ html{ font-family: "Myriad Set Pro","Lucida Grande","Helvetica Neue","Helvetica"
         <h3 class="ui-title">Are you sure you want to delete this file?</h3>
     <p>This action cannot be undone.</p>
         <a href="#" class="ui-btn ui-corner-all ui-shadow ui-btn-inline ui-btn-b" data-rel="back">Cancel</a>
-        <a href="#" class="ui-btn ui-corner-all ui-shadow ui-btn-inline ui-btn-b" data-rel="back" data-transition="flow">Delete</a>
+        <a href="/delete::''' + page + '''" class="ui-btn ui-corner-all ui-shadow ui-btn-inline ui-btn-b" data-rel="back" data-transition="flow" >Delete</a>
     </div>
 </div>
 ''' )
@@ -420,7 +431,6 @@ html{ font-family: "Myriad Set Pro","Lucida Grande","Helvetica Neue","Helvetica"
         headers = "HTTP/1.1 200 OK\n"
         headers += "Content length: %d\n" % len(''.join(output))
         headers += "Content-Type: text/html\n"
-        #headers += "Set-Cookie: host="+socket.gethostname()+"; expires="+str(datetime.utcnow()+timedelta(days=1)).split('.')[0]+"; secure\n\n"
         if not add_headers:
             return ''.join(output)
         else:
@@ -450,11 +460,7 @@ html{ font-family: "Myriad Set Pro","Lucida Grande","Helvetica Neue","Helvetica"
                 else:
                     output.append( json.dumps({'login': 'FAIL'}) )
         elif 'download' in form_data:
-            if self.validate_pysync_key( cookies ):
-                output.append( json.dumps({'download': 'DATA', 'pysync_key': 'OK'}) )
-            else:
-                output.append( json.dumps({'download': 'FAIL', 'pysync_key': 'FAIL'}) )
-            output.insert(0, "\n" )
+            headers, output = self.download( form_data['download'], cookies )
         else:
             output.append( json.dumps(cookies) )
             output.append( json.dumps(form_data) )
@@ -463,8 +469,39 @@ html{ font-family: "Myriad Set Pro","Lucida Grande","Helvetica Neue","Helvetica"
         if not headers:
             headers = "HTTP/1.1 200 OK\n"
             headers += "Content length: %d\n" % len(''.join(output))
-            headers += "Content-Type: application/json\n"
+            headers += "Content-Type: text/html\n"
         return headers + ''.join(output)
+
+    def download( self, file_path, cookies ):
+        if self.validate_pysync_key( cookies ):
+            file_dir = '/'.join(file_path.split('/')[:-1])
+            file_dir += '/'
+            file_name = file_path.split('/')[-1]
+            if len(file_dir) > 1:
+                file_dir = file_dir[1:]
+            file_path = self.real_path( file_dir, file_name )
+            if os.path.exists(file_path):
+                with open( file_path, 'rb' ) as download:
+                    output = [''.join(download)]
+            headers = "HTTP/1.1 200 OK\n"
+            headers += "Content length: %d\n" % len(output)
+            headers += "Content-Type: application/octet-stream\n"
+            headers += 'Content-Disposition: attachment;filename=\"' + file_name + '\"\n\n'
+        else:
+            output = ['''\n\n
+<div data-role="page" data-dialog="true">
+    <title>Verification Failed</title>
+
+    <div data-role="header">
+        <h1>Verification Failed</h1>
+    </div><!-- /header -->
+
+    <div role="main" class="ui-content">
+        <h1>Verification Failed</h1>
+        <p>Please sign in to verify identity</p>
+    </div><!-- /content -->
+</div><!-- /page -->''']
+        return headers, output
 
     def validate_pysync_key( self, cookies ):
         res = False
@@ -496,8 +533,9 @@ html{ font-family: "Myriad Set Pro","Lucida Grande","Helvetica Neue","Helvetica"
 
     def get_form_data( self, data ):
         form_data = {}
+        post = urllib.unquote( data.split('\r\n')[-1] ).decode('utf8')
         try:
-            form_data = dict([p.split('=') for p in data.split('\r\n')[-1].split('&')])
+            form_data = dict([p.split('=') for p in post.split('&')])
         except:
             form_data = {}
         return form_data
