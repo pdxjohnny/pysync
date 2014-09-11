@@ -279,18 +279,22 @@ class pysync_server(object):
         #        pass
         return "OK"
 
-    def https_server( self, data ):
-        if type(data) is bool:
-            return self.BAD_REQUEST
-        elif 'GET' in data:
-            page = data[data.index('GET')+4 : data.index('HTTP')-1]
-        elif 'POST' in data:
-            page = data[data.index('POST')+5 : data.index('HTTP')-1]
-            return self.https_post_response( page, data )
-        else:
-            return self.BAD_REQUEST
+    def https_server( self, data, page=False, add_headers=False ):
+        if not page:
+            if type(data) is bool:
+                return self.BAD_REQUEST
+            elif 'GET' in data:
+                page = data[data.index('GET')+4 : data.index('HTTP')-1]
+                print 'GET', page
+            elif 'POST' in data:
+                page = data[data.index('POST')+5 : data.index('HTTP')-1]
+                print 'POST', page
+                return self.https_post_response( page, data )
+            else:
+                return self.BAD_REQUEST
         page = urllib.unquote( page ).decode('utf8')
         cookies = self.get_cookies( data )
+
         output = [
 '''
 <!DOCTYPE html>
@@ -330,7 +334,36 @@ html{ font-family: "Myriad Set Pro","Lucida Grande","Helvetica Neue","Helvetica"
 </body>
 </html>
 ''' ]
-        if page == '/':
+        if not self.validate_pysync_key( cookies ):
+            output[1] = '''
+<div data-role="page" data-dialog="true">
+
+    <div data-role="header">
+        <h1>Login</h1>
+    </div><!-- /header -->
+
+    <div role="main" class="ui-content">
+        <h1>Login</h1>
+        <form action="/login" method='post' data-ajax="false" >
+            <div data-role="fieldcontain">
+                <label for="username">Username:</label>
+                <input type="text" name="username" id="username" />
+            </div>
+            <div data-role="fieldcontain">
+                <label for="password">Password:</label>
+                <input type="password" name="password" id="password" />
+            </div>
+            <div data-role="fieldcontain">
+                <center>
+                    <input type="submit" value="Login" />
+                </center>
+            </div>
+'''
+            output[2] = '''
+        </form>
+    </div><!-- /content -->
+'''
+        elif page == '/' or page == '/login' :
             sql = pysync_sql( dbname=self.real_path('/','.pysyncfiles') )
             all_dirs = sql.all_files_by_dir()
             sql.con.close()
@@ -388,40 +421,64 @@ html{ font-family: "Myriad Set Pro","Lucida Grande","Helvetica Neue","Helvetica"
         headers += "Content length: %d\n" % len(''.join(output))
         headers += "Content-Type: text/html\n"
         #headers += "Set-Cookie: host="+socket.gethostname()+"; expires="+str(datetime.utcnow()+timedelta(days=1)).split('.')[0]+"; secure\n\n"
-        return headers + ''.join(output)
+        if not add_headers:
+            return ''.join(output)
+        else:
+            return headers + ''.join(output)
 
     def https_post_response( self, page, data ):
         cookies = self.get_cookies( data )
         form_data = self.get_form_data( data )
         output = []
+        headers = False
         sql = pysync_sql( dbname=self.real_path('/','.pysyncfiles') )
         if 'username' in form_data and 'password' in form_data:
             with sql.con:
                 cur = sql.con.cursor()
                 cur.execute('SELECT username FROM pysync_users WHERE username=\"' + form_data['username'] + '\" AND password=\"' + form_data['password'] + '\"')
                 if len(cur.fetchall()) is 1:
-                    print '[  LOG  ]  User \"' + form_data['username'] + '\" logded in'
                     pysync_key = self.encode( str(random.random()), form_data['username']*3 )
-                    output.append( json.dumps({'login': 'OK'}) )
-                    output.insert(0, "Set-Cookie: pysync_key="+pysync_key+"; expires="+str(datetime.utcnow()+timedelta(days=1)).split('.')[0]+"; secure\n\n" )
+                    output.append( self.https_server( data, page, add_headers=False ) )
+                    output.insert( 0, '<meta http-equiv="refresh" content="0; url=/" />' )
+                    headers = "HTTP/1.1 200 OK\n"
+                    headers += "Content length: %d\n" % len(''.join(output))
+                    headers += "Content-Type: text/html\n"
+                    headers += "Set-Cookie: pysync_key="+pysync_key+"; expires="+str(datetime.utcnow()+timedelta(days=1)).split('.')[0]+"; secure\n"
+                    headers += "Set-Cookie: pysync_username=\""+form_data['username']+"\"; expires="+str(datetime.utcnow()+timedelta(days=1)).split('.')[0]+"; secure\n\n"
                     cur.execute('UPDATE pysync_users SET pysync_key=\"' + pysync_key + '\" WHERE username=\"' + form_data['username'] + '\" AND password=\"' + form_data['password'] + '\"')
+                    print '[  LOG  ]  User \"' + form_data['username'] + '\" logded in'
                 else:
                     output.append( json.dumps({'login': 'FAIL'}) )
-        elif 'pysync_key' in cookies and 'download' in form_data and 'username' in form_data:
+        elif 'download' in form_data:
+            if self.validate_pysync_key( cookies ):
+                output.append( json.dumps({'download': 'DATA', 'pysync_key': 'OK'}) )
+            else:
+                output.append( json.dumps({'download': 'FAIL', 'pysync_key': 'FAIL'}) )
+            output.insert(0, "\n" )
+        else:
+            output.append( json.dumps(cookies) )
+            output.append( json.dumps(form_data) )
+            output.append( data )
+            output.insert(0, "\n\n" )
+        if not headers:
+            headers = "HTTP/1.1 200 OK\n"
+            headers += "Content length: %d\n" % len(''.join(output))
+            headers += "Content-Type: application/json\n"
+        return headers + ''.join(output)
+
+    def validate_pysync_key( self, cookies ):
+        res = False
+        if 'pysync_key' in cookies and 'pysync_username' in cookies:
+            sql = pysync_sql( dbname=self.real_path('/','.pysyncfiles') )
             with sql.con:
                 cur = sql.con.cursor()
-                cur.execute('SELECT pysync_key FROM pysync_users WHERE username=\"' + form_data['username'] + '\"')
-                if cookies['pysync_key'] == cur.fetchall()[0][0]:
-                    output.append( json.dumps({'download': 'DATA', 'pysync_key': 'OK'}) )
-                else:
-                    output.append( json.dumps({'download': 'FAIL', 'pysync_key': 'FAIL'}) )
-                output.insert(0, "\n" )
-        sql.con.commit()
-        sql.con.close()
-        headers = "HTTP/1.1 200 OK\n"
-        headers += "Content length: %d\n" % len(''.join(output))
-        headers += "Content-Type: application/json\n"
-        return headers + ''.join(output)
+                cur.execute('SELECT pysync_key FROM pysync_users WHERE username=\"' + cookies['pysync_username'] + '\"')
+                try:
+                    if cookies['pysync_key'] == cur.fetchall()[0][0]:
+                        res = True
+                except Exception, e:
+                    print e, cookies['pysync_username'], cookies['pysync_key']
+        return res
 
     def get_cookies( self, data ):
         cookies = []
@@ -439,12 +496,10 @@ html{ font-family: "Myriad Set Pro","Lucida Grande","Helvetica Neue","Helvetica"
 
     def get_form_data( self, data ):
         form_data = {}
-        lines = data.split('\r\n')
-        for line in xrange(0,len(lines)):
-            if "Content-Disposition: form-data; " in lines[line]:
-                content = lines[line:line+3]
-                content[0].split('Content-Disposition: form-data; name="')[1][:-1]
-                form_data[content[0].split('Content-Disposition: form-data; name="')[1][:-1]] = content[2]
+        try:
+            form_data = dict([p.split('=') for p in data.split('\r\n')[-1].split('&')])
+        except:
+            form_data = {}
         return form_data
  
     def encode( self, key, string ):
@@ -914,6 +969,8 @@ if __name__ == '__main__':
     server.start()
     if args.server:
         set_host_parms( args.server )
+    else:
+        set_host_parms()
     while True:
         if server.change_host_pipe.poll():
             res = server.change_host_pipe.recv()
