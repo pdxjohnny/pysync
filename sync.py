@@ -1,6 +1,6 @@
 #! /usr/bin/python
 # -*- coding: utf-8 -*-
-import socket, sys, json, os, time, sqlite3, pprint, SocketServer, signal, base64, ctypes, struct, urllib, traceback, ssl, Cookie, argparse, getpass, random
+import socket, sys, json, os, time, sqlite3, pprint, SocketServer, signal, base64, ctypes, struct, urllib, traceback, ssl, Cookie, argparse, getpass, random, codecs
 from datetime import datetime, timedelta
 from multiprocessing import Process, Pipe, Lock, freeze_support
 if os.name != 'nt':
@@ -257,7 +257,7 @@ class pysync_server(object):
             print "Updated sql %s %s " % ( data['file_dir'], data['name'] )
             del data['contents']
             data = json.dumps( data )
-            data = self.encode( str(datetime.utcnow())[:7], data )
+            #data = self.encode( str(datetime.utcnow())[:7], data )
             return data
         elif data['type'] == "get_db":
             return self.create_file_packet( self.real_path('/','.pysyncfiles'), str(datetime.utcnow())[:7] )
@@ -284,9 +284,21 @@ class pysync_server(object):
             if type(data) is bool:
                 return self.BAD_REQUEST
             elif 'GET' in data:
-                page = data[data.index('GET')+4 : data.index('HTTP')-1]
+                page = data[data.index('GET')+4 : data.index('HTTP')]
+                try:
+                    if page[-1] == ' ':
+                        page = page[:-1]
+                except Exception, e:
+                    print "[ ERROR ] ", e
+                    print "[ ERROR ] Page was: ", page
             elif 'POST' in data:
-                page = data[data.index('POST')+5 : data.index('HTTP')-1]
+                page = data[data.index('POST')+5 : data.index('HTTP')]
+                try:
+                    if page[-1] == ' ':
+                        page = page[:-1]
+                except Exception, e:
+                    print "[ ERROR ] ", e
+                    print "[ ERROR ] Page was: ", page
                 return self.https_post_response( page, data )
             else:
                 return self.BAD_REQUEST
@@ -313,6 +325,7 @@ class pysync_server(object):
 <div data-role="page">
 
     <div data-role="header">
+        <a href="#" data-rel="back" class="ui-btn-left ui-btn ui-icon-back ui-btn-icon-notext ui-shadow ui-corner-all" data-role="button" role="button">Back</a>
         <h1>Py Sync</h1>
     </div><!-- /header -->
 
@@ -365,20 +378,24 @@ html{ font-family: "Myriad Set Pro","Lucida Grande","Helvetica Neue","Helvetica"
             sql = pysync_sql( dbname=self.real_path('/','.pysyncfiles') )
             all_dirs = sql.all_files_by_dir()
             sql.con.close()
+            for row in all_dirs['/']:
+                output.insert(2, '\n<li><a href="/'+row['name']+'" data-transition="flip" >'+row['name']+'</a></li>')
             for directory in all_dirs:
-                for row in all_dirs[directory]:
-                    output.insert(2, '\n<li><a href="'+directory+row['name']+'" data-transition="flip" >'+row['name']+'</a></li>')
-                output.insert(2, '\n<li data-role="list-divider" ><a href="/'+directory+'" data-transition="flip" >'+directory+'</a></li>')
+                if directory != '/' and directory.count('/') is 1:
+                    output.insert(2, '\n<li><a href="/'+directory+'" data-transition="flip" >'+directory+'</a></li>')
         elif page.startswith( '/download::' ):
             headers, output = self.download( page.split( '/download::' )[1], cookies )
+            return headers + output
         elif page[-1] == '/':
             table = page[1:]
             sql = pysync_sql( dbname=self.real_path('/','.pysyncfiles') )
-            all_files = sql.all_files( table )
+            all_dirs = sql.all_files_by_dir()
             sql.con.close()
-            for row in all_files:
+            for row in all_dirs[table]:
                 output.insert(2, '\n<li><a href="/'+table+row['name']+'" data-transition="flip" >'+row['name']+'</a></li>')
-            output.insert(2, '\n<li data-role="list-divider" ><h1>'+table+'</h1></li>')
+            for directory in all_dirs:
+                if directory.startswith(table) and directory.count('/') is table.count('/')+1:
+                    output.insert(2, '\n<li><a href="/'+directory+'" data-transition="flip" >'+directory+'</a></li>')
         else:
             file_dir = '/'.join(page.split('/')[:-1])
             file_dir += '/'
@@ -409,7 +426,7 @@ function pysync_file_download(){
     });
 }
 </script>
-<li><a href="/download::''' + page + '''" data-ajax="false" target="_blank" >Download</a></li>
+<li><a href="/download::''' + page + '''" data-ajax="false" >Download</a></li>
 <li><a href="/edit::''' + page + '''" target="_blank" >Edit</a></li>
 <li><a href="#popupDialog" data-rel="popup" data-position-to="window" data-transition="pop" >Delete</a></li>
 <div data-role="popup" id="popupDialog" data-dismissible="false" style="max-width:400px;">
@@ -480,15 +497,54 @@ function pysync_file_download(){
             if len(file_dir) > 1:
                 file_dir = file_dir[1:]
             file_path = self.real_path( file_dir, file_name )
+            output = ''
             if os.path.exists(file_path):
                 with open( file_path, 'rb' ) as download:
-                    output = [''.join(download)]
+                    output = download.read()
             headers = "HTTP/1.1 200 OK\n"
             headers += "Content length: %d\n" % len(output)
             headers += "Content-Type: application/octet-stream\n"
             headers += 'Content-Disposition: attachment;filename=\"' + file_name + '\"\n\n'
+            try:
+                return headers.encode("utf-8"), output.encode("utf-8")
+            except Exception, e:
+                output = '''
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Py Sync</title>
+
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    <link rel="shortcut icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAABy0lEQVRYR2NkGGDAOMD2M4w6YDQERkNgcIaAcegqfmLKh7Orwz5iU4dPP7oerCFgF7H0PzEOAKp5dmhFtDSyWmL0AvXA7cXqAMfYlcQ6gOEPC6PY4flhr0GOIEXf/sXhYLsxHOCSuK6QkZGhj8gQACvbPS+I0TVpHbqjPwGlQBgE+KAYbixID1YHeKRvwvD9jpl+cIdik//PyBDH+J9hEbKjCemByWOEgHfONgwHbJ3iBVbnkLWKh5uJ5zOyRf///89hZGScQmyIwcyCqcdwgF/hLhQHADmnNve7mYM0+Bbu+g3UwIJs2aZ+N0Z0PXgdw8hUtanPpR2rAwJL9xUCUwVJ8b++ywnsicCyfUQnXJgejDQQUn2IaENAmte02qGEILH6kfWhGBDecJxoB6xssATrxaYHJkeMPIoDolpPo8f/XWAim4Qcp4yMTP+XV5tMhomh6wGJL6s2hZtLSB6uMLbrQiEDw3+U+F9cZkiwrojtOv8HaCczsbkA3Uy4BQn9lzGCf0GhLkEHgCzGpheLgz4AzRNEF4dbkDzlOoYD5uZoEuWApEnXixmZGHpwhcJfRkbPBdkaO7DJE2UBscFLjrpRB4yGwGgIjIYAAFvsmiFDG+h+AAAAAElFTkSuQmCC" />
+    <link rel="stylesheet" href="https://code.jquery.com/mobile/1.4.3/jquery.mobile-1.4.3.min.css" />
+    <script src="https://code.jquery.com/jquery-1.11.1.min.js"></script>
+    <script src="https://code.jquery.com/mobile/1.4.3/jquery.mobile-1.4.3.min.js"></script>
+</head>
+<body>
+<div data-role="page" data-dialog="true">
+    <title>Download Failed</title>
+
+    <div data-role="header">
+        <h1>Download Failed</h1>
+    </div><!-- /header -->
+
+    <div role="main" class="ui-content">
+        <h1>Download Failed</h1>
+        <p>
+        [ ERROR ] ''' + str(e) + '''<br><br>
+        ''' +  traceback.format_exc() + '''
+        </p>
+    </div><!-- /content -->
+</div><!-- /page -->
+</body>
+</html>'''
+                headers = "HTTP/1.1 200 OK\n"
+                headers += "Content length: %d\n" % len(output)
+                headers += "Content-Type: text/html\n\n"
+                return headers.encode("utf-8"), output.encode("utf-8")
         else:
-            output = ['''\n\n
+            output = '''\n\n
 <div data-role="page" data-dialog="true">
     <title>Verification Failed</title>
 
@@ -500,8 +556,8 @@ function pysync_file_download(){
         <h1>Verification Failed</h1>
         <p>Please sign in to verify identity</p>
     </div><!-- /content -->
-</div><!-- /page -->''']
-        return headers, output
+</div><!-- /page -->'''
+        return headers.encode("utf-8"), output.encode("utf-8")
 
     def validate_pysync_key( self, cookies ):
         res = False
@@ -617,7 +673,8 @@ function pysync_file_download(){
             if make_json:
                 file_packet = json.dumps( file_packet )
             if key:
-                file_packet = self.encode( key, file_packet )
+                pass
+                #file_packet = self.encode( key, file_packet )
             return file_packet
         else:
             print "Couldn't find ", file_path
@@ -625,7 +682,8 @@ function pysync_file_download(){
  
     def unpack_packet( self, packet, key=False ):
         if key:
-            packet = self.decode( key, packet )
+            pass
+            #packet = self.decode( key, packet )
         packet = json.loads( packet )
         if packet['type'] == "complete_file":
             try:
@@ -687,8 +745,8 @@ function pysync_file_download(){
             self.pysync_server_address = server_props['address']
             self.pysync_server_port = server_props['port']
         # get the server's sql database
-        packet = {'type': 'get_db'}
-        packet = self.encode( str(datetime.utcnow())[:7], json.dumps(packet) )
+        packet = json.dumps( {'type': 'get_db'} )
+        #packet = self.encode( str(datetime.utcnow())[:7], packet )
         response = self.send( packet )
         if response:
             sync_with_path = self.real_path( '/','.sync_with')
@@ -754,8 +812,8 @@ function pysync_file_download(){
                         if my_file['modified'] < server_file['modified'] and server_file['modified_on'] != socket.gethostname():
                             print "\t", my_file['modified'],  "<",server_file['modified'], "\n\t",server_file['modified_on'], "!=",socket.gethostname()
                             # Request the file from the server
-                            packet = {'type': 'get_file', 'file_dir': server_file['file_dir'], 'name': server_file['name'] }
-                            packet = self.encode( str(datetime.utcnow())[:7], json.dumps(packet) )
+                            packet = json.dumps( {'type': 'get_file', 'file_dir': server_file['file_dir'], 'name': server_file['name'] } )
+                            #packet = self.encode( str(datetime.utcnow())[:7], packet )
                             server_file = self.unpack_packet( self.send( packet ), str(datetime.utcnow())[:7] )
                             self.write_file( server_file )
                             # Set the date to after it was finished being writin
@@ -768,14 +826,15 @@ function pysync_file_download(){
                             server_file['modified_on'] = socket.gethostname()
                             server_file['type'] = 'update_sql'
                             server_file['modified'] = server_modified_time
-                            updated_server_file = self.encode( str(datetime.utcnow())[:7], json.dumps( server_file ) )
+                            updated_server_file = json.dumps( server_file )
+                            #updated_server_file = self.encode( str(datetime.utcnow())[:7], updated_server_file )
                             self.send( updated_server_file )
                             print "Updated from server ", server_file['name'], server_file['modified_on']
                     else:
                         print "\tLocal version not present"
                         # Request the file from the server
-                        packet = {'type': 'get_file', 'file_dir': server_file['file_dir'], 'name': server_file['name'] }
-                        packet = self.encode( str(datetime.utcnow())[:7], json.dumps(packet) )
+                        packet = json.dumps( {'type': 'get_file', 'file_dir': server_file['file_dir'], 'name': server_file['name'] } )
+                        #packet = self.encode( str(datetime.utcnow())[:7], json.dumps(packet) )
                         server_file = self.unpack_packet( self.send( packet ), str(datetime.utcnow())[:7] )
                         self.write_file( server_file )
                         # Set the date to after it was finished being writin
@@ -788,7 +847,8 @@ function pysync_file_download(){
                         server_file['modified_on'] = socket.gethostname()
                         server_file['modified'] = server_modified_time
                         server_file['type'] = 'update_sql'
-                        updated_server_file = self.encode( str(datetime.utcnow())[:7], json.dumps( server_file ) )
+                        updated_server_file = json.dumps( server_file )
+                        #updated_server_file = self.encode( str(datetime.utcnow())[:7], updated_server_file )
                         self.send( updated_server_file )
                         print "Created from server ", server_file['name'], server_file['modified_on']
                 except Exception, e:
@@ -882,6 +942,7 @@ class pysync_connection_handler(SocketServer.BaseRequestHandler):
                     self.request.sendall( response )
                 except Exception, e:
                     print "[ ERROR ] Sending response: ", e
+                    traceback.print_exc()
             except Exception, e:
                 response = "[ ERROR ] Creating response: ", e
         except Exception, e:
@@ -916,7 +977,7 @@ def am_i_host( make_host ):
         time.sleep(10)
  
 def start_server():
-    server.socket_server = SSLTCPServer((server.pysync_server_address, server.pysync_server_port), pysync_connection_handler)
+    server.socket_server = SSLTCPServer((server.my_address, server.my_port), pysync_connection_handler)
     server.socket_server.serve_forever()
  
 def watch( watch_host, watch_lock ):
@@ -966,7 +1027,10 @@ def set_host_parms( host=False ):
             server.is_host(True)
         else:
             try:
-                host = { 'address': host.split(':')[0], 'port': int(host.split(':')[1]) }
+                if ':' not in host:
+                    host = { 'address': host, 'port': 3639 }
+                else:
+                    host = { 'address': host.split(':')[0], 'port': int(host.split(':')[1]) }
             except:
                 print "[  FAIL ] Host in form of address:port, default port is 3639"
             try:
