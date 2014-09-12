@@ -14,6 +14,8 @@ openssl x509 -req -days 365 -in server.csr -signkey server.key -out server.crt
 
 |Contains|To Do|Bugs|
 |---|---|---|
-| Web viewer| Node Queue| Files transfer mulitiple times|
-| Syncing| Downloads||
-| SSL| Sign in||
+| Web viewer| Server Queue| Files transfer mulitiple times|
+| Syncing|| Some downloads (encoding issues)|
+| SSL|||
+| Downloads||
+| Sign in||
