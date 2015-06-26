@@ -17,7 +17,7 @@ class pysync_sql(object):
             if len(cur.fetchall()) < 1:
                 cur.execute('CREATE TABLE \"pysync_users\"(username TEXT, password TEXT, pysync_key TEXT)')
                 self.con.commit()
- 
+
     def update_dir( self, file_dir=False ):
         if file_dir:
             with self.con:
@@ -26,7 +26,7 @@ class pysync_sql(object):
                 if len(cur.fetchall()) < 1:
                     cur.execute('CREATE TABLE \"' + file_dir + '\"(id integer primary key AUTOINCREMENT, name TEXT, modified_by TEXT, modified_on TEXT, created datetime, modified datetime, status TEXT)')
                     self.con.commit()
- 
+
     def update_file( self, file_dir=False, file_properties=False ):
         if file_dir and file_properties:
             file_dir = file_dir.replace('\\','/')
@@ -69,7 +69,7 @@ class pysync_sql(object):
             dirs = [ file_dir[0] for file_dir in cur.fetchall() ]
             self.con.commit()
             return dirs
- 
+
     def all_files( self, table=False ):
         dirs = self.all_dirs()
         all_files = [];
@@ -122,7 +122,7 @@ class pysync_sql(object):
                         } )
             self.con.commit()
             return all_files_by_dir
- 
+
     def get_file( self, file_dir=False, file_name=False ):
         file_dir = file_dir.replace('\\','/')
         with self.con:
@@ -143,11 +143,11 @@ class pysync_sql(object):
             except:
                 self.con.commit()
                 return False
- 
+
 class pysync_server(object):
     """Sends and recives files"""
     BAD_REQUEST = 400
- 
+
     def __init__( self, pysync_dir=False, my_address="0.0.0.0", my_port=3639 ):
         self.my_address = my_address
         self.my_port = my_port
@@ -169,7 +169,7 @@ class pysync_server(object):
         else:
             import fcntl
         self.username = os.path.expanduser("~")
- 
+
     def start( self ):
         self.make_host, am_i_host_conn = Pipe()
         self.change_host_pipe, watch_host = Pipe()
@@ -178,16 +178,16 @@ class pysync_server(object):
         self.am_i_host_process.start()
         self.watch_process = Process( target=watch, args=(watch_host, self.watch_lock) )
         self.watch_process.start()
- 
+
     def is_host( self, is_host=False ):
         self.make_host.send(is_host)
- 
+
     def change_host( self, change_host=False ):
         print "Testing connection to host..."
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock = ssl.wrap_socket(sock,
                            ca_certs=self.ssl_cert,
-                           cert_reqs=ssl.CERT_REQUIRED)
+                           cert_reqs=ssl.CERT_NONE)
         test_con = (change_host['address'], change_host['port'])
         sock.connect( test_con )
         if self.change_host_pipe.poll():
@@ -201,7 +201,7 @@ class pysync_server(object):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock = ssl.wrap_socket(sock,
                            ca_certs=self.ssl_cert,
-                           cert_reqs=ssl.CERT_REQUIRED)
+                           cert_reqs=ssl.CERT_NONE)
         server = (self.pysync_server_address, self.pysync_server_port)
         #print "Sending to ", server
         try:
@@ -595,7 +595,7 @@ function pysync_file_download(){
         except:
             form_data = {}
         return form_data
- 
+
     def encode( self, key, string ):
         encoded_chars = []
         for i in xrange(len(string)):
@@ -604,7 +604,7 @@ function pysync_file_download(){
             encoded_chars.append(encoded_c)
         encoded_string = "".join(encoded_chars)
         return base64.urlsafe_b64encode(encoded_string)
- 
+
     def write_file( self, file_packet ):
         if os.name == 'nt':
             file_packet['file_dir'] = file_packet['file_dir'].replace('/','\\')
@@ -619,7 +619,7 @@ function pysync_file_download(){
         if os.name == 'nt' and file_packet['name'][0] == '.':
             ctypes.windll.kernel32.SetFileAttributesW(unicode(write_to), 0x02)
         return True
- 
+
     def decode( self, key, string ):
         string = base64.urlsafe_b64decode(string)
         decoded_chars = []
@@ -629,7 +629,7 @@ function pysync_file_download(){
             decoded_chars.append(decoded_c)
         decoded_string = "".join(decoded_chars)
         return decoded_string
- 
+
     def recv_msg( self, sock ):
         msg_length = sock.recv(15).strip()
         if not msg_length:
@@ -641,7 +641,7 @@ function pysync_file_download(){
         else:
             msg_length = int(msg_length)
         return self.recvall( sock, msg_length )
- 
+
     def recvall( self, sock, n ):
         data = ''
         while len(data) < n:
@@ -650,7 +650,7 @@ function pysync_file_download(){
                 return False
             data += packet
         return data
- 
+
     def create_file_packet( self, file_path, key=False, contents=True, make_json=True ):
         if os.path.isfile( file_path ):
             file_dir, file_name = self.dir_and_name( file_path )
@@ -679,7 +679,7 @@ function pysync_file_download(){
         else:
             print "Couldn't find ", file_path
             return False
- 
+
     def unpack_packet( self, packet, key=False ):
         if key:
             pass
@@ -691,7 +691,7 @@ function pysync_file_download(){
             except:
                 pass
         return packet
- 
+
     def send_file( self, file_path=False, file_packet=False ):
         if not file_packet:
             file_packet = self.create_file_packet( file_path, str(datetime.utcnow())[:7] )
@@ -703,7 +703,7 @@ function pysync_file_download(){
                 return False
         else:
             return "No such file"
- 
+
     def scan_dir( self, directory ):
         contents = os.listdir(directory)
         for item in contents:
@@ -714,7 +714,7 @@ function pysync_file_download(){
                     self.scan_dir( directory + item + "/" )
             if os.path.isfile( directory + item ):
                 self.compare_file( directory + item )
- 
+
     def compare_file( self, file_path ):
         sql = pysync_sql( dbname=self.pysync_dir+'.pysyncfiles' )
         file_packet = self.create_file_packet( file_path, contents=False, make_json=False )
@@ -975,11 +975,11 @@ def am_i_host( make_host ):
             except:
                 server.server_process.TerminateProcess()
         time.sleep(10)
- 
+
 def start_server():
     server.socket_server = SSLTCPServer((server.my_address, server.my_port), pysync_connection_handler)
     server.socket_server.serve_forever()
- 
+
 def watch( watch_host, watch_lock ):
     while True:
         if watch_host.poll():
